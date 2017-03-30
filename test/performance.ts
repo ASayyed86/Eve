@@ -5,10 +5,6 @@ import * as test from "tape";
 
 test("test single block performance with 10000 transactions", (assert) => {
 
-  // -----------------------------------------------------
-  // program
-  // -----------------------------------------------------
-
   let prog = new Program("test");
   prog.block("simple block", ({find, record, lib}) => {
     let person = find("person");
@@ -18,12 +14,8 @@ test("test single block performance with 10000 transactions", (assert) => {
     ]
   });
 
-  // -----------------------------------------------------
-  // verification
-  // -----------------------------------------------------
-
-  for(let ix = 0; ix < 1; ix++) {
-    prog.index = new HashIndex();
+  for(let ix = 0; ix < 10; ix++) {
+    prog.clear();
     let size = 10000;
     let changes = [];
     for(let i = 0; i < size; i++) {

@@ -2,6 +2,13 @@
 // Ops
 //-------------------------------------------------------------------------
 
+// TODO:
+//  - Distinct index
+//  - get multiplicities
+//  - accept
+//  - index insert
+//  - functions
+
 use indexes::BitIndex;
 use std::collections::HashMap;
 use std::mem::transmute;
@@ -10,6 +17,7 @@ use std::mem::transmute;
 // Frame
 //-------------------------------------------------------------------------
 
+#[derive(Debug)]
 pub struct Change {
     e: u32,
     a: u32,
@@ -30,21 +38,122 @@ pub struct Block {
 }
 
 //-------------------------------------------------------------------------
+// row
+//-------------------------------------------------------------------------
+
+#[derive(Debug)]
+pub struct Row {
+    fields: Vec<u32>,
+    count: u32,
+    round: u32,
+    solved_fields: u64,
+}
+
+impl Row {
+    pub fn new(size:usize) -> Row {
+        Row { fields: vec![0; size], count: 0, round: 0, solved_fields: 0 }
+    }
+
+    pub fn set(&mut self, field_index:u32, value:u32) {
+        self.fields[field_index as usize] = value;
+        set_bit(&mut self.solved_fields, field_index);
+    }
+
+    pub fn clear(&mut self, field_index:u32) {
+        self.fields[field_index as usize] = 0;
+        clear_bit(&mut self.solved_fields, field_index);
+    }
+
+    pub fn reset(&mut self, size:u32) {
+        self.count = 0;
+        self.round = 0;
+        self.solved_fields = 0;
+        for field_index in 0..size {
+            self.fields[field_index as usize] = 0;
+        }
+    }
+}
+
+//-------------------------------------------------------------------------
+// Estimate Iter
+//-------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+pub enum EstimateIter {
+    Scan {estimate: u32, pos: u32, values: Vec<u32>, output: u32},
+    // Function {estimate: u32, args:Vec<Value>, func: fn(args:Vec<Value>), output: u32},
+}
+
+impl EstimateIter {
+    pub fn estimate(&self) -> u32 {
+        match self {
+            &EstimateIter::Scan {estimate, pos, ref values, output} => {
+                estimate
+            },
+        }
+    }
+    pub fn next(&mut self, row:&mut Row) -> bool {
+        match self {
+            &mut EstimateIter::Scan {ref estimate, ref mut pos, ref values, ref output} => {
+                if *pos >= values.len() as u32 {
+                    false
+                } else {
+                    row.set(*output, values[*pos as usize]);
+                    *pos = *pos + 1;
+                    true
+                }
+            },
+        }
+    }
+    pub fn clear(&mut self, row:&mut Row) {
+        match self {
+            &mut EstimateIter::Scan {ref mut estimate, ref mut pos, ref values, ref output} => {
+                row.clear(*output);
+            },
+        }
+    }
+}
+
+//-------------------------------------------------------------------------
 // Frame
 //-------------------------------------------------------------------------
 
 pub struct Frame<'a> {
     input: &'a Change,
-    vars: Vec<u32>,
-    solved_vars: u64,
+    row: Row,
     index: &'a BitIndex,
     constraints: Option<&'a Vec<Constraint>>,
     blocks: &'a Vec<Block>,
+    iters: Vec<Option<EstimateIter>>,
 }
 
 impl<'a> Frame<'a> {
     pub fn new(index: &'a BitIndex, blocks: &'a Vec<Block>, input:&'a Change) -> Frame<'a> {
-        Frame {vars: vec![], solved_vars:0, index, input, blocks, constraints: None}
+        Frame {row: Row::new(64), index, input, blocks, constraints: None, iters: vec![None; 64]}
+    }
+
+    pub fn resolve(&self, field:&Field) -> u32 {
+        match field {
+            &Field::Register(cur) => self.row.fields[cur],
+            &Field::Value(cur) => cur,
+        }
+    }
+
+    pub fn check_iter(&mut self, iter_ix:u32, iter: EstimateIter) {
+        let ix = iter_ix as usize;
+        let neue = match self.iters[ix] {
+            None => {
+                Some(iter)
+            },
+            Some(ref cur) if cur.estimate() > iter.estimate() => {
+                Some(iter)
+            },
+            _ => None,
+        };
+        match neue {
+            Some(_) => { self.iters[ix] = neue; },
+            None => {},
+        }
     }
 }
 
@@ -56,48 +165,125 @@ impl<'a> Frame<'a> {
 
 pub enum Instruction {
     start_block { block: u32 },
-    get_iterator {bail: i32, constraint: u32},
-    iterator_next {bail: i32},
+    get_iterator {iterator: u32, bail: i32, constraint: u32},
+    iterator_next {iterator: u32, bail: i32},
     accept {bail: i32, constraint:u32},
+    get_rounds {bail: i32},
     output {next: i32, constraint:u32},
 }
 
-pub fn start_block(frame: &mut Frame, block:u32) -> usize {
-    println!("STARTING! {:?}", block);
+pub fn start_block(frame: &mut Frame, block:u32) -> i32 {
+    // println!("STARTING! {:?}", block);
     frame.constraints = Some(&frame.blocks[block as usize].constraints);
     1
 }
 
-pub fn get_iterator(frame: &mut Frame, constraint:u32, bail:i32) -> usize {
+pub fn get_iterator(frame: &mut Frame, iter_ix:u32, constraint:u32, bail:i32) -> i32 {
     let cur = match frame.constraints {
         Some(ref constraints) => &constraints[constraint as usize],
-        None => return bail as usize,
+        None => return bail,
     };
-    match *cur {
-        Constraint::Scan {ref e, ref a, ref v} => {
-            println!("get scan iterator {:?}", cur);
+    match cur {
+        &Constraint::Scan {ref e, ref a, ref v, ref register_mask} => {
+            // if we have already solved all of this scan's vars, we just move on
+            if check_bits(frame.row.solved_fields, *register_mask) {
+                return 1;
+            }
+
+            let resolved_e = frame.resolve(e);
+            let resolved_a = frame.resolve(a);
+            let resolved_v = frame.resolve(v);
+
+            // println!("Getting proposal for {:?} {:?} {:?}", resolved_e, resolved_a, resolved_v);
+            let mut iter = frame.index.propose(resolved_e, resolved_a, resolved_v);
+            match iter {
+                EstimateIter::Scan {estimate, pos, ref values, ref mut output} => {
+                    *output = match (*output, e, a, v) {
+                        (0, &Field::Register(reg), _, _) => reg as u32,
+                        (1, _, &Field::Register(reg), _) => reg as u32,
+                        (2, _, _, &Field::Register(reg)) => reg as u32,
+                        _ => panic!("bad scan output"),
+                    };
+                }
+            }
+            frame.check_iter(iter_ix, iter);
+            // println!("get scan iterator {:?} : count {:?}", cur, frame.index.propose(resolved_e, resolved_a, resolved_v,0,0,0,0));
         },
-        Constraint::Function {ref op, ref out, ref params} => {
-            println!("get function iterator {:?}", cur);
+        &Constraint::Function {ref op, ref out, ref params} => {
+            // println!("get function iterator {:?}", cur);
         },
         _ => {}
     };
     1
 }
 
-pub fn iterator_next(frame: &mut Frame, bail:i32) -> usize {
-    println!("next!");
+pub fn iterator_next(frame: &mut Frame, iterator:u32, bail:i32) -> i32 {
+    let go = {
+        let mut iter = frame.iters[iterator as usize].as_mut();
+        // println!("Iter Next: {:?}", iter);
+        match iter {
+            Some(ref mut cur) => {
+                match cur.next(&mut frame.row) {
+                    false => {
+                        cur.clear(&mut frame.row);
+                        bail
+                    },
+                    true => 1,
+                }
+            },
+            None => bail,
+        }
+    };
+    if(go == bail) {
+        frame.iters[iterator as usize] = None;
+    }
+    // println!("Row: {:?}", &frame.row.fields[0..3]);
+    go
+}
+
+pub fn accept(frame: &mut Frame, constraint:u32, bail:i32) -> i32 {
+    let cur = match frame.constraints {
+        Some(ref constraints) => &constraints[constraint as usize],
+        None => return bail as i32,
+    };
+    match cur {
+        &Constraint::Scan {ref e, ref a, ref v, ref register_mask} => {
+            // println!("scan accept {:?}", cur);
+        },
+        &Constraint::Function {ref op, ref out, ref params} => {
+            // println!("function accept {:?}", cur);
+        },
+        _ => {}
+    };
     1
 }
 
-pub fn accept(frame: &mut Frame, constraint:u32, bail:i32) -> usize {
-    println!("accept! {:?}", constraint);
+pub fn get_rounds(frame: &mut Frame, bail:i32) -> i32 {
+    // println!("get rounds!");
     1
 }
 
-pub fn output(frame: &mut Frame, constraint:u32, next:i32) -> usize {
-    println!("output! {:?}", constraint);
-    1
+pub fn output(frame: &mut Frame, constraint:u32, next:i32) -> i32 {
+    let cur = match frame.constraints {
+        Some(ref constraints) => &constraints[constraint as usize],
+        None => return next,
+    };
+    match cur {
+        &Constraint::Insert {ref e, ref a, ref v} => {
+            let c = Change {
+                e: frame.resolve(e),
+                a: frame.resolve(a),
+                v: frame.resolve(v),
+                n: 0,
+                round: 0,
+                transaction: 0,
+                count: 1,
+            };
+            // println!("insert {:?}", c);
+        },
+        _ => {}
+    };
+    next
 }
 
 //-------------------------------------------------------------------------
@@ -106,11 +292,11 @@ pub fn output(frame: &mut Frame, constraint:u32, next:i32) -> usize {
 
 #[derive(Debug)]
 pub enum Field {
-    Register(u32),
+    Register(usize),
     Value(u32),
 }
 
-pub fn register(ix: u32) -> Field {
+pub fn register(ix: usize) -> Field {
     Field::Register(ix)
 }
 
@@ -141,7 +327,9 @@ impl Interner {
             Some(&id) => id,
             None => {
                 let next = self.next_id;
-                self.value_to_id.push(thing);
+                self.id_to_value.insert(thing, next);
+                // @FIXME: trying to fix this gets me into borrow checker sadness
+                // self.value_to_id.push(thing.copy());
                 self.next_id += 1;
                 next
             }
@@ -153,6 +341,11 @@ impl Interner {
         Field::Value(self.internable_to_id(thing))
     }
 
+    pub fn string_id(&mut self, string:&str) -> u32 {
+        let thing = Internable::String(string.to_string());
+        self.internable_to_id(thing)
+    }
+
     pub fn number(&mut self, num:f32) -> Field {
         let bitpattern = unsafe {
             transmute::<f32, u32>(num)
@@ -160,47 +353,41 @@ impl Interner {
         let thing = Internable::Number(bitpattern);
         Field::Value(self.internable_to_id(thing))
     }
+
+    pub fn number_id(&mut self, num:f32) -> u32 {
+        let bitpattern = unsafe {
+            transmute::<f32, u32>(num)
+        };
+        let thing = Internable::Number(bitpattern);
+        self.internable_to_id(thing)
+    }
 }
 
 //-------------------------------------------------------------------------
-// Scan
-//-------------------------------------------------------------------------
-
-pub struct Scan {
-    e: Field,
-    a: Field,
-    v: Field,
-}
-
-//-------------------------------------------------------------------------
-// Function
-//-------------------------------------------------------------------------
-
-pub struct Function {
-    op: String,
-    out: Vec<Field>,
-    params: Vec<Field>,
-}
-
-//-------------------------------------------------------------------------
-// Insert
-//-------------------------------------------------------------------------
-
-pub struct Insert {
-    e: Field,
-    a: Field,
-    v: Field,
-}
-
-//-------------------------------------------------------------------------
-// Insert
+// Constraint
 //-------------------------------------------------------------------------
 
 #[derive(Debug)]
 pub enum Constraint {
-    Scan {e: Field, a: Field, v: Field},
+    Scan {e: Field, a: Field, v: Field, register_mask: u64},
     Function {op: String, out: Vec<Field>, params: Vec<Field>},
     Insert {e: Field, a: Field, v:Field},
+}
+
+pub fn make_register_mask(fields: Vec<&Field>) -> u64 {
+    let mut mask = 0;
+    for field in fields {
+        match field {
+            &Field::Register(r) => set_bit(&mut mask, r as u32),
+            _ => {},
+        }
+    }
+    mask
+}
+
+pub fn make_scan(e:Field, a:Field, v:Field) -> Constraint {
+    let register_mask = make_register_mask(vec![&e,&a,&v]);
+    Constraint::Scan{e, a, v, register_mask }
 }
 
 //-------------------------------------------------------------------------
@@ -219,37 +406,41 @@ fn set_bit(solved:&mut u64, bit:u32) {
     *solved |= 1 << bit
 }
 
+fn clear_bit(solved:&mut u64, bit:u32) {
+    *solved &= !(1 << bit)
+}
+
 //-------------------------------------------------------------------------
 // Interpret
 //-------------------------------------------------------------------------
 
-pub fn interpret(pipe:&Vec<Instruction>, blocks:&Vec<Block>) {
-    println!("Doing work");
-    let change = Change { e:0, a:0, v:0, n:0, round:0, transaction:0, count:0};
-    let mut index = BitIndex::new();
-    let mut frame = Frame::new(&index, blocks, &change);
-    let mut pointer = 0;
-    let len = pipe.len();
+pub fn interpret(mut frame:&mut Frame, pipe:&Vec<Instruction>) {
+    // println!("Doing work");
+    let mut pointer:i32 = 0;
+    let len = pipe.len() as i32;
     while pointer < len {
-        let inst = &pipe[pointer];
+        let inst = &pipe[pointer as usize];
         pointer += match *inst {
             Instruction::start_block {block} => {
                 start_block(&mut frame, block)
             },
-            Instruction::get_iterator { constraint, bail } => {
-                get_iterator(&mut frame, constraint, bail)
+            Instruction::get_iterator { iterator, constraint, bail } => {
+                get_iterator(&mut frame, iterator, constraint, bail)
             },
-            Instruction::iterator_next { bail } => {
-                iterator_next(&mut frame, bail)
+            Instruction::iterator_next { iterator, bail } => {
+                iterator_next(&mut frame, iterator, bail)
             },
             Instruction::accept { constraint, bail } => {
                 accept(&mut frame, constraint, bail)
+            },
+            Instruction::get_rounds { bail } => {
+                get_rounds(&mut frame, bail)
             },
             Instruction::output { constraint, next } => {
                 output(&mut frame, constraint, next)
             },
             _ => {
-                println!("SKIPPING");
+                // println!("SKIPPING");
                 1
             }
         }
@@ -304,8 +495,106 @@ mod tests {
         //
         let mut int = Interner::new();
         let constraints = vec![
-            Constraint::Scan {e: register(0), a: int.string("tag"), v: int.string("person")},
-            Constraint::Scan {e: register(0), a: int.string("name"), v: register(1)},
+            make_scan(register(0), int.string("tag"), int.string("person")),
+            make_scan(register(0), int.string("name"), register(1)),
+            Constraint::Function {op: "concat".to_string(), out: vec![register(2)], params: vec![int.string("name: "), register(1)]},
+            Constraint::Function {op: "gen_id".to_string(), out: vec![register(3)], params: vec![register(0), register(2)]},
+            // Constraint::Insert {e: register(3), a: int.string("tag"), v: int.string("html/div")},
+            // Constraint::Insert {e: register(3), a: int.string("person"), v: register(0)},
+            // Constraint::Insert {e: register(3), a: int.string("text"), v: register(2)},
+            Constraint::Insert {e: int.string("foo"), a: int.string("tag"), v: int.string("html/div")},
+            Constraint::Insert {e: int.string("foo"), a: int.string("person"), v: register(0)},
+            Constraint::Insert {e: int.string("foo"), a: int.string("text"), v: register(1)},
+        ];
+
+        let blocks = vec![
+            Block { name: "simple block".to_string(), constraints },
+        ];
+
+        let pipe = vec![
+            Instruction::start_block { block:0 },
+
+            Instruction::get_iterator {bail: 100000, constraint: 0, iterator: 0},
+            Instruction::get_iterator {bail: 100000, constraint: 1, iterator: 0},
+            // Instruction::get_iterator {bail: 100000, constraint: 2, iterator: 0},
+            // Instruction::get_iterator {bail: 100000, constraint: 3, iterator: 0},
+
+            Instruction::iterator_next { bail: 100000, iterator: 0},
+
+            Instruction::accept {bail: -1, constraint: 0},
+            Instruction::accept {bail: -2, constraint: 1},
+            Instruction::accept {bail: -3, constraint: 2},
+            Instruction::accept {bail: -4, constraint: 3},
+
+            Instruction::get_iterator {bail: -5, constraint: 0, iterator: 1},
+            Instruction::get_iterator {bail: -6, constraint: 1, iterator: 1},
+            // Instruction::get_iterator {bail: -7, constraint: 2, iterator: 1},
+            // Instruction::get_iterator {bail: -8, constraint: 3, iterator: 1},
+
+            Instruction::iterator_next { bail: -7, iterator: 1},
+
+            Instruction::accept {bail: -1, constraint: 0},
+            Instruction::accept {bail: -2, constraint: 1},
+            Instruction::accept {bail: -3, constraint: 2},
+            Instruction::accept {bail: -4, constraint: 3},
+
+            // Instruction::get_iterator {bail: -5, constraint: 0, iterator: 2},
+            // Instruction::get_iterator {bail: -6, constraint: 1, iterator: 2},
+            // Instruction::get_iterator {bail: -7, constraint: 2, iterator: 2},
+            // Instruction::get_iterator {bail: -8, constraint: 3, iterator: 2},
+
+            // Instruction::iterator_next { bail: -9, iterator: 2 },
+
+            // Instruction::accept {bail: -1, constraint: 0},
+            // Instruction::accept {bail: -2, constraint: 1},
+            // Instruction::accept {bail: -3, constraint: 2},
+            // Instruction::accept {bail: -4, constraint: 3},
+
+            // Instruction::get_iterator {bail: -5, constraint: 0, iterator:3},
+            // Instruction::get_iterator {bail: -6, constraint: 1, iterator:3},
+            // Instruction::get_iterator {bail: -7, constraint: 2, iterator:3},
+            // Instruction::get_iterator {bail: -8, constraint: 3, iterator:3},
+
+            // Instruction::iterator_next { bail: -9, iterator: 3 },
+
+            // Instruction::accept {bail: -1, constraint: 0},
+            // Instruction::accept {bail: -2, constraint: 1},
+            // Instruction::accept {bail: -3, constraint: 2},
+            // Instruction::accept {bail: -4, constraint: 3},
+
+            Instruction::get_rounds {bail: -5},
+
+            Instruction::output {next: 1, constraint: 4},
+            Instruction::output {next: 1, constraint: 5},
+            Instruction::output {next: -8, constraint: 6},
+        ];
+
+        let change = Change { e:0, a:0, v:0, n:0, round:0, transaction:0, count:0};
+        let mut index = BitIndex::new();
+        index.insert(int.string_id("foo"), int.string_id("tag"), int.string_id("person"), 0,0,0,0);
+        index.insert(int.string_id("foo"), int.string_id("name"), int.string_id("chris"), 0,0,0,0);
+        index.insert(int.string_id("meep"), int.string_id("tag"), int.string_id("person"), 0,0,0,0);
+        index.insert(int.string_id("meep"), int.string_id("name"), int.string_id("chris"), 0,0,0,0);
+        let mut frame = Frame::new(&mut index, &blocks, &change);
+
+        interpret(&mut frame, &pipe);
+    }
+
+
+    #[bench]
+    fn bench_simple_GJ(b:&mut Bencher) {
+        // prog.block("simple block", ({find, record, lib}) => {
+        //  let person = find("person");
+        //  let text = `name: ${person.name}`;
+        //  return [
+        //    record("html/div", {person, text})
+        //  ]
+        // });
+        //
+        let mut int = Interner::new();
+        let constraints = vec![
+            make_scan(register(0), int.string("tag"), int.string("person")),
+            make_scan(register(0), int.string("name"), register(1)),
             Constraint::Function {op: "concat".to_string(), out: vec![register(2)], params: vec![int.string("name: "), register(1)]},
             Constraint::Function {op: "gen_id".to_string(), out: vec![register(3)], params: vec![register(0), register(2)]},
             Constraint::Insert {e: register(3), a: int.string("tag"), v: int.string("html/div")},
@@ -320,59 +609,70 @@ mod tests {
         let pipe = vec![
             Instruction::start_block { block:0 },
 
-            Instruction::get_iterator {bail: 0, constraint: 0},
-            Instruction::get_iterator {bail: 0, constraint: 1},
-            Instruction::get_iterator {bail: 0, constraint: 2},
-            Instruction::get_iterator {bail: 0, constraint: 3},
+            Instruction::get_iterator {bail: 100000, constraint: 0, iterator: 0},
+            Instruction::get_iterator {bail: 100000, constraint: 1, iterator: 0},
+            Instruction::get_iterator {bail: 100000, constraint: 2, iterator: 0},
+            Instruction::get_iterator {bail: 100000, constraint: 3, iterator: 0},
 
-            Instruction::iterator_next { bail: 0 },
-
-            Instruction::accept {bail: -1, constraint: 0},
-            Instruction::accept {bail: -2, constraint: 1},
-            Instruction::accept {bail: -3, constraint: 2},
-            Instruction::accept {bail: -4, constraint: 3},
-
-            Instruction::get_iterator {bail: -5, constraint: 0},
-            Instruction::get_iterator {bail: -6, constraint: 1},
-            Instruction::get_iterator {bail: -7, constraint: 2},
-            Instruction::get_iterator {bail: -8, constraint: 3},
-
-            Instruction::iterator_next { bail: -9 },
+            Instruction::iterator_next { bail: 100000, iterator: 0},
 
             Instruction::accept {bail: -1, constraint: 0},
             Instruction::accept {bail: -2, constraint: 1},
             Instruction::accept {bail: -3, constraint: 2},
             Instruction::accept {bail: -4, constraint: 3},
 
-            Instruction::get_iterator {bail: -5, constraint: 0},
-            Instruction::get_iterator {bail: -6, constraint: 1},
-            Instruction::get_iterator {bail: -7, constraint: 2},
-            Instruction::get_iterator {bail: -8, constraint: 3},
+            Instruction::get_iterator {bail: -5, constraint: 0, iterator: 1},
+            Instruction::get_iterator {bail: -6, constraint: 1, iterator: 1},
+            Instruction::get_iterator {bail: -7, constraint: 2, iterator: 1},
+            Instruction::get_iterator {bail: -8, constraint: 3, iterator: 1},
 
-            Instruction::iterator_next { bail: -9 },
+            Instruction::iterator_next { bail: -9, iterator: 1},
+
+            Instruction::accept {bail: -1, constraint: 0},
+            Instruction::accept {bail: -2, constraint: 1},
+            Instruction::accept {bail: -3, constraint: 2},
+            Instruction::accept {bail: -4, constraint: 3},
+
+            Instruction::get_iterator {bail: -5, constraint: 0, iterator: 2},
+            Instruction::get_iterator {bail: -6, constraint: 1, iterator: 2},
+            Instruction::get_iterator {bail: -7, constraint: 2, iterator: 2},
+            Instruction::get_iterator {bail: -8, constraint: 3, iterator: 2},
+
+            Instruction::iterator_next { bail: -9, iterator: 2 },
 
             Instruction::accept {bail: -1, constraint: 0},
             Instruction::accept {bail: -2, constraint: 1},
             Instruction::accept {bail: -3, constraint: 2},
             Instruction::accept {bail: -4, constraint: 3},
 
-            Instruction::get_iterator {bail: -5, constraint: 0},
-            Instruction::get_iterator {bail: -6, constraint: 1},
-            Instruction::get_iterator {bail: -7, constraint: 2},
-            Instruction::get_iterator {bail: -8, constraint: 3},
+            Instruction::get_iterator {bail: -5, constraint: 0, iterator:3},
+            Instruction::get_iterator {bail: -6, constraint: 1, iterator:3},
+            Instruction::get_iterator {bail: -7, constraint: 2, iterator:3},
+            Instruction::get_iterator {bail: -8, constraint: 3, iterator:3},
 
-            Instruction::iterator_next { bail: -9 },
+            Instruction::iterator_next { bail: -9, iterator: 3 },
 
             Instruction::accept {bail: -1, constraint: 0},
             Instruction::accept {bail: -2, constraint: 1},
             Instruction::accept {bail: -3, constraint: 2},
             Instruction::accept {bail: -4, constraint: 3},
+
+            Instruction::get_rounds {bail: -5},
 
             Instruction::output {next: 1, constraint: 4},
-            Instruction::output {next: -6, constraint: 5},
+            Instruction::output {next: 1, constraint: 5},
+            Instruction::output {next: -7, constraint: 6},
         ];
 
-        interpret(&pipe, &blocks);
+        let mut index = BitIndex::new();
+        index.insert(int.string_id("foo"), int.string_id("tag"), int.string_id("person"), 0,0,0,0);
+        index.insert(int.string_id("foo"), int.string_id("name"), int.string_id("chris"), 0,0,0,0);
+
+        b.iter(|| {
+            let change = Change { e:0, a:0, v:0, n:0, round:0, transaction:0, count:0};
+            let mut frame = Frame::new(&mut index, &blocks, &change);
+            interpret(&mut frame, &pipe);
+        })
     }
 
 }

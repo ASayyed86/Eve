@@ -47,27 +47,31 @@ pub struct Row {
     count: u32,
     round: u32,
     solved_fields: u64,
+    solving_for:u64,
 }
 
 impl Row {
     pub fn new(size:usize) -> Row {
-        Row { fields: vec![0; size], count: 0, round: 0, solved_fields: 0 }
+        Row { fields: vec![0; size], count: 0, round: 0, solved_fields: 0, solving_for: 0 }
     }
 
     pub fn set(&mut self, field_index:u32, value:u32) {
         self.fields[field_index as usize] = value;
-        set_bit(&mut self.solved_fields, field_index);
+        self.solving_for = set_bit(0, field_index);
+        self.solved_fields = set_bit(self.solved_fields, field_index);
     }
 
     pub fn clear(&mut self, field_index:u32) {
         self.fields[field_index as usize] = 0;
-        clear_bit(&mut self.solved_fields, field_index);
+        self.solving_for = 0;
+        self.solved_fields = clear_bit(self.solved_fields, field_index);
     }
 
     pub fn reset(&mut self, size:u32) {
         self.count = 0;
         self.round = 0;
         self.solved_fields = 0;
+        self.solving_for = 0;
         for field_index in 0..size {
             self.fields[field_index as usize] = 0;
         }
@@ -194,7 +198,7 @@ pub fn get_iterator(frame: &mut Frame, iter_ix:u32, constraint:u32, bail:i32) ->
             let resolved_a = frame.resolve(a);
             let resolved_v = frame.resolve(v);
 
-            // println!("Getting proposal for {:?} {:?} {:?}", resolved_e, resolved_a, resolved_v);
+            println!("Getting proposal for {:?} {:?} {:?}", resolved_e, resolved_a, resolved_v);
             let mut iter = frame.index.propose(resolved_e, resolved_a, resolved_v);
             match iter {
                 EstimateIter::Scan {estimate, pos, ref values, ref mut output} => {
@@ -220,7 +224,7 @@ pub fn get_iterator(frame: &mut Frame, iter_ix:u32, constraint:u32, bail:i32) ->
 pub fn iterator_next(frame: &mut Frame, iterator:u32, bail:i32) -> i32 {
     let go = {
         let mut iter = frame.iters[iterator as usize].as_mut();
-        // println!("Iter Next: {:?}", iter);
+        println!("Iter Next: {:?}", iter);
         match iter {
             Some(ref mut cur) => {
                 match cur.next(&mut frame.row) {
@@ -234,10 +238,10 @@ pub fn iterator_next(frame: &mut Frame, iterator:u32, bail:i32) -> i32 {
             None => bail,
         }
     };
-    if(go == bail) {
+    if go == bail {
         frame.iters[iterator as usize] = None;
     }
-    // println!("Row: {:?}", &frame.row.fields[0..3]);
+    println!("Row: {:?}", &frame.row.fields[0..3]);
     go
 }
 
@@ -248,14 +252,28 @@ pub fn accept(frame: &mut Frame, constraint:u32, bail:i32) -> i32 {
     };
     match cur {
         &Constraint::Scan {ref e, ref a, ref v, ref register_mask} => {
-            // println!("scan accept {:?}", cur);
+            // if we aren't solving for something in this scan cares about, then we
+            // automatically accept it.
+            if !check_bits(*register_mask, frame.row.solving_for) {
+                println!("auto accept {:?} {:?}", cur, frame.row.solving_for);
+               return 1;
+            }
+            let resolved_e = frame.resolve(e);
+            let resolved_a = frame.resolve(a);
+            let resolved_v = frame.resolve(v);
+            let checked = frame.index.check(resolved_e, resolved_a, resolved_v);
+            println!("scan accept {:?} {:?}", cur, checked);
+            match checked {
+                true => 1,
+                false => bail,
+            }
         },
         &Constraint::Function {ref op, ref out, ref params} => {
             // println!("function accept {:?}", cur);
+            1
         },
-        _ => {}
-    };
-    1
+        _ => { 1 }
+    }
 }
 
 pub fn get_rounds(frame: &mut Frame, bail:i32) -> i32 {
@@ -279,7 +297,7 @@ pub fn output(frame: &mut Frame, constraint:u32, next:i32) -> i32 {
                 transaction: 0,
                 count: 1,
             };
-            // println!("insert {:?}", c);
+            println!("insert {:?}", c);
         },
         _ => {}
     };
@@ -378,7 +396,7 @@ pub fn make_register_mask(fields: Vec<&Field>) -> u64 {
     let mut mask = 0;
     for field in fields {
         match field {
-            &Field::Register(r) => set_bit(&mut mask, r as u32),
+            &Field::Register(r) => mask = set_bit(mask, r as u32),
             _ => {},
         }
     }
@@ -398,16 +416,16 @@ fn check_bits(solved:u64, checking:u64) -> bool {
     solved & checking == checking
 }
 
-fn has_bit(solved:u64, bit:u32) -> bool {
+fn has_bit(solved:u64, bit:u64) -> bool {
     (solved >> bit) & 1 == 1
 }
 
-fn set_bit(solved:&mut u64, bit:u32) {
-    *solved |= 1 << bit
+fn set_bit(solved:u64, bit:u32) -> u64 {
+    solved | (1 << bit)
 }
 
-fn clear_bit(solved:&mut u64, bit:u32) {
-    *solved &= !(1 << bit)
+fn clear_bit(solved:u64, bit:u32) -> u64 {
+    solved & !(1 << bit)
 }
 
 //-------------------------------------------------------------------------
@@ -469,7 +487,7 @@ mod tests {
     fn test_set_bit() {
         let mut solved = 41;
         let setting = 2;
-        set_bit(&mut solved, setting);
+        solved = set_bit(solved, setting);
         assert_eq!(45, solved);
     }
 
@@ -575,6 +593,9 @@ mod tests {
         index.insert(int.string_id("foo"), int.string_id("name"), int.string_id("chris"), 0,0,0,0);
         index.insert(int.string_id("meep"), int.string_id("tag"), int.string_id("person"), 0,0,0,0);
         index.insert(int.string_id("meep"), int.string_id("name"), int.string_id("chris"), 0,0,0,0);
+        index.insert(int.string_id("joe"), int.string_id("tag"), int.string_id("person"), 0,0,0,0);
+        index.insert(int.string_id("eep"), int.string_id("name"), int.string_id("loop"), 0,0,0,0);
+        index.insert(int.string_id("eep2"), int.string_id("name"), int.string_id("loop"), 0,0,0,0);
         let mut frame = Frame::new(&mut index, &blocks, &change);
 
         interpret(&mut frame, &pipe);

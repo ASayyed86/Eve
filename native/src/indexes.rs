@@ -100,6 +100,16 @@ impl BitMatrix {
     }
 
     pub fn check(&self, e:u32, v:u32) -> bool {
+        if e > 0 && v > 0 {
+            self.check_both(e, v)
+        } else if e > 0 {
+            self.check_value(e)
+        } else {
+            self.check_entity(v)
+        }
+    }
+
+    pub fn check_both(&self, e:u32, v:u32) -> bool {
         let bins = self.bins;
         let mut size = self.size();
         let mut e_start = 0;
@@ -128,6 +138,104 @@ impl BitMatrix {
             0 => false,
             _ => true,
         }
+    }
+
+    pub fn check_entity(&self, v: u32) -> bool {
+        let bins = self.bins;
+        // Each frame on the stack is encoded as:
+        //    level, matrix, e_start, v_start
+        let mut queue = vec![0, 0, 0, 0];
+        let mut queue_pos = 0;
+        let mut queue_length = 1;
+        let max_level = self.height - 1;
+        let full_size = self.size();
+        while queue_pos < queue_length {
+            let curPos = queue_pos * 4;
+            let level = queue[curPos];
+            let matrix = queue[curPos + 1];
+            let e_start = queue[curPos + 2];
+            let v_start = queue[curPos + 3];
+            let size = full_size / bins.pow(level);
+            // since only the column is fixed, we need to look at all the rows.
+            for e_ix in 0..bins {
+                // find the subarray that contain that column and the current row
+                let v_edge = v_start + size/bins;
+                let v_ix = v / v_edge;
+                let e_value = e_start + e_ix * size / bins;
+                let pos = e_ix * bins + v_ix;
+                let next = self.level_store.get(matrix, pos);
+                match next {
+                    0 => {},
+                    any => {
+                        // if we are at the leaves, add this to the fill
+                        if level == max_level {
+                            return true
+                        } else {
+                            // if we're not at the leaves, push them onto the stack
+                            queue.push(level + 1);
+                            queue.push(next);
+                            queue.push(e_value);
+                            queue.push(v_start + v_ix * (size / bins));
+                            queue_length = queue_length + 1;
+                        }
+                    }
+                }
+            }
+
+            // now that we've looked at all the rows, we move the queue forward
+            queue_pos = queue_pos + 1;
+        }
+        false
+    }
+
+    pub fn check_value(&self, e: u32) -> bool {
+        let bins = self.bins;
+        // Each frame on the stack is encoded as:
+        //    level, matrix, e_start, v_start
+        let mut queue = vec![0, 0, 0, 0];
+        let mut queue_pos = 0;
+        let mut queue_length = 1;
+        let max_level = self.height - 1;
+        let full_size = self.size();
+        while queue_pos < queue_length {
+            let curPos = queue_pos * 4;
+            let level = queue[curPos];
+            let matrix = queue[curPos + 1];
+            let e_start = queue[curPos + 2];
+            let v_start = queue[curPos + 3];
+            let size = full_size / bins.pow(level);
+            // since only the column is fixed, we need to look at all the rows.
+            for v_ix in 0..bins {
+
+                // find the subarray that contain that row and the current column
+                let e_edge = e_start + size/bins;
+                let e_ix = e / e_edge;
+                let v_value = v_start + v_ix * size / bins;
+                let pos = e_ix * bins + v_ix;
+                let next = self.level_store.get(matrix, pos);
+                // println!("Checking {:?} {:?} {:?} | e_ix {:?} v_ix {:?} | size {:?}", matrix, pos, next, e_ix, v_ix, size);
+                match next {
+                    0 => {},
+                    any => {
+                        // if we are at the leaves, add this to the fill
+                        if level == max_level {
+                            return true;
+                        } else {
+                            // if we're not at the leaves, push them onto the stack
+                            queue.push(level + 1);
+                            queue.push(next);
+                            queue.push(e_start + e_ix * (size / bins));
+                            queue.push(v_value);
+                            queue_length = queue_length + 1;
+                        }
+                    }
+                }
+            }
+
+            // now that we've looked at all the rows, we move the queue forward
+            queue_pos = queue_pos + 1;
+        }
+        false
     }
 
     pub fn find_entities(&self, v: u32, fill:&mut Vec<u32>) {
@@ -226,6 +334,49 @@ impl BitMatrix {
         }
     }
 
+    pub fn all_values(&self, fill:&mut Vec<u32>) {
+        let bins = self.bins;
+        // Each frame on the stack is encoded as:
+        //    level, matrix, e_start, v_start
+        let mut queue = vec![0, 0, 0, 0];
+        let mut queue_pos = 0;
+        let mut queue_length = 1;
+        let level_size = bins * bins;
+        let max_level = self.height - 1;
+        let full_size = self.size();
+        while queue_pos < queue_length {
+            let curPos = queue_pos * 4;
+            let level = queue[curPos];
+            let matrix = queue[curPos + 1];
+            let e_start = queue[curPos + 2];
+            let v_start = queue[curPos + 3];
+            let size = full_size / bins.pow(level);
+            for pos in 0..level_size {
+                let next = self.level_store.get(matrix, pos);
+                if next > 0 {
+                    let e_ix = pos / bins;
+                    let e_value = e_start + e_ix * size / bins;
+                    let v_ix = pos % bins;
+                    let v_value = v_start + v_ix * size / bins;
+                    // if we are at the leaves, add this to the fill
+                    if level == max_level {
+                        fill.push(e_value);
+                    } else {
+                        // if we're not at the leaves, push them onto the stack
+                        queue.push(level + 1);
+                        queue.push(next);
+                        queue.push(e_value);
+                        queue.push(v_value);
+                        queue_length = queue_length + 1;
+                    }
+                }
+            }
+
+            // now that we've looked at all the rows, we move the queue forward
+            queue_pos = queue_pos + 1;
+        }
+    }
+
     pub fn propose(&self, iter:&mut EstimateIter, e:u32, v:u32) {
         match *iter {
             EstimateIter::Scan { ref mut estimate, ref mut output, ref mut values, pos } => {
@@ -239,6 +390,7 @@ impl BitMatrix {
                     *estimate = values.len() as u32;
                     *output = 0;
                 } else {
+                    self.all_values(values);
                     *estimate = self.cardinality;
                     *output = 0;
                 }
@@ -263,6 +415,8 @@ impl BitIndex {
     }
     pub fn propose(&self, e:u32, a:u32, v:u32) -> EstimateIter {
         if a == 0 {
+            // @FIXME: this isn't always safe. In the case where we have an arbitrary lookup, if we
+            // then propose, we might propose values that we then never actually check are correct.
             let mut values = vec![];
             for key in self.matrices.keys() {
                 values.push(*key);
@@ -281,7 +435,12 @@ impl BitIndex {
     pub fn resolve_proposal() {
 
     }
-    pub fn check(&self, e:u32, a:u32, v:u32, n:u32, round:u32, transaction:u32, count:u32) -> bool {
+    pub fn check(&self, e:u32, a:u32, v:u32) -> bool {
+        // @FIXME: this isn't always safe. In the case where we have an arbitrary lookup, if we
+        // then propose, we might propose values that we then never actually check are correct.
+        if a == 0 {
+            return true;
+        }
         let matrix = match self.matrices.get(&a) {
             None => return false,
             Some(matrix) => matrix,
@@ -311,11 +470,11 @@ mod tests {
         index.insert(1,2,1,0,0,0,0);
         index.insert(2,3,1,0,0,0,0);
         index.insert(1,3,100,0,0,0,0);
-        assert!(index.check(1,1,1,0,0,0,0));
-        assert!(index.check(1,2,1,0,0,0,0));
-        assert!(index.check(2,3,1,0,0,0,0));
-        assert!(index.check(1,3,100,0,0,0,0));
-        assert!(!index.check(100,300,100,0,0,0,0));
+        assert!(index.check(1,1,1));
+        assert!(index.check(1,2,1));
+        assert!(index.check(2,3,1));
+        assert!(index.check(1,3,100));
+        assert!(!index.check(100,300,100));
     }
 
     #[test]
@@ -323,9 +482,9 @@ mod tests {
         let mut index = BitIndex::new();
         index.insert(5,3,8,0,0,0,0);
         index.insert(9,3,8,0,0,0,0);
-        assert!(index.check(5,3,8,0,0,0,0));
-        assert!(index.check(9,3,8,0,0,0,0));
-        assert!(!index.check(100,300,100,0,0,0,0));
+        assert!(index.check(5,3,8));
+        assert!(index.check(9,3,8));
+        assert!(!index.check(100,300,100));
     }
 
     #[test]

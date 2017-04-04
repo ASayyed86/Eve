@@ -21,11 +21,11 @@ fn main() {
     index.insert(1,2,1,0,0,0,0);
     index.insert(2,3,1,0,0,0,0);
     index.insert(1,3,100,0,0,0,0);
-    println!("{:?}", index.check(1,1,1,0,0,0,0));
-    println!("{:?}", index.check(1,2,1,0,0,0,0));
-    println!("{:?}", index.check(2,3,1,0,0,0,0));
-    println!("{:?}", index.check(1,3,100,0,0,0,0));
-    println!("{:?}", index.check(1,9,100,0,0,0,0));
+    println!("{:?}", index.check(1,1,1));
+    println!("{:?}", index.check(1,2,1));
+    println!("{:?}", index.check(2,3,1));
+    println!("{:?}", index.check(1,3,100));
+    println!("{:?}", index.check(1,9,100));
 
     let start = Instant::now();
     for _ in 0..10 {

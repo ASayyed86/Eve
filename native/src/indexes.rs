@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use ops::EstimateIter;
 use ops::Change;
 use std::cmp;
+use std;
+use std::collections::hash_map::Entry;
 
 //-------------------------------------------------------------------------
 // Utils
@@ -1066,6 +1068,7 @@ mod tests {
     fn benchmark(b:&mut Bencher) {
         let mut total = 0;
         let mut times = 0;
+        let mut levels = 0;
         b.iter(|| {
             times += 1;
             let mut index = BitMatrix::new();
@@ -1078,8 +1081,37 @@ mod tests {
                 index.insert(e % 10000, val % 10000);
             }
             total += index.cardinality;
+            levels = index.level_store.levels.len() / 64;
         });
         println!("{:?} : {:?}", times, total);
+        println!("levels: {:?}", levels);
+    }
+
+    #[bench]
+    fn benchmark_read(b:&mut Bencher) {
+        let mut total = 0;
+        let mut times = 0;
+        let mut levels = 0;
+        let mut index = BitMatrix::new();
+        let mut seed = 0;
+        for ix in 0..100000 {
+            let e = rand(seed);
+            seed = e;
+            let val = rand(seed);
+            seed = val;
+            index.insert(e % 10000, val % 10000);
+        }
+        seed = 0;
+        let mut v = vec![];
+        b.iter(|| {
+            let e = rand(seed);
+            seed = e;
+            let val = rand(seed);
+            seed = val;
+            index.find_values(e % 10000, &mut v);
+        });
+        println!("{:?} : {:?}", times, total);
+        println!("found: {:?}", v.len());
     }
 
     struct HashIndex {
@@ -1091,23 +1123,61 @@ mod tests {
 
     impl HashIndex {
         pub fn new() -> HashIndex {
-            HashIndex { full: HashMap::new(), e: HashMap::new(), v: HashMap::new(), size: 0 }
+            HashIndex { full: HashMap::with_capacity(100000), e: HashMap::new(), v: HashMap::new(), size: 0 }
         }
-        pub fn insert(&mut self, e: u32, v:u32) {
-            let key = (e, v);
-            if !self.full.contains_key(&key) {
-                self.size += 1;
-                self.full.insert(key, true);
-                let es = self.e.entry(e).or_insert_with(|| vec![]);
-                es.push(v);
+        // pub fn insert(&mut self, e: u32, v:u32) -> bool {
+
+        //     let key = (e, v);
+        //     let existed = self.full.contains_key(&key);
+        //     if !existed {
+        //         self.size += 1;
+        //         self.full.insert(key, true);
+        //         let es = self.e.entry(e).or_insert_with(|| vec![]);
+        //         es.push(v);
+        //         let vs = self.v.entry(v).or_insert_with(|| vec![]);
+        //         vs.push(e);
+        //     };
+        //     existed
+        // }
+
+        pub fn insert(&mut self, e: u32, v:u32) -> bool {
+            let added = match self.e.entry(e) {
+                Entry::Occupied(mut o) => {
+                    let mut es = o.get_mut();
+                    if es.contains(&v) {
+                        false
+                    } else {
+                        es.push(v);
+                        true
+                    }
+                }
+                Entry::Vacant(o) => {
+                    o.insert(vec![v]);
+                    true
+                },
+            };
+            if added {
                 let vs = self.v.entry(v).or_insert_with(|| vec![]);
-                vs.push(v);
+                vs.push(e);
+            }
+            added
+        }
+
+        pub fn check(&self, e: u32, v:u32) -> bool {
+            let key = (e, v);
+            self.full.contains_key(&key)
+        }
+
+        pub fn find_values(&self, e:u32, vec: &mut Vec<u32>) {
+            match self.e.get(&e) {
+                Some(es) => vec.extend(es),
+                None => {},
             }
         }
     }
 
     #[bench]
-    fn bench_hashtable(b:&mut Bencher) {
+    fn bench_hash_write(b:&mut Bencher) {
         let mut total = 0;
         let mut times = 0;
         b.iter(|| {
@@ -1122,9 +1192,63 @@ mod tests {
                 index.insert(e % 10000, val % 10000);
                 // println!("inserting {:?} {:?}", e, val);
             }
-            total += index.size;
+            // total += index.size;
         });
         println!("{:?} : {:?}", times, total);
+    }
+
+    // #[bench]
+    // fn benchmark_hash_read(b:&mut Bencher) {
+    //     let mut total = 0;
+    //     let mut times = 0;
+    //     let mut levels = 0;
+    //     let mut index = HashIndex::new();
+    //     let mut seed = 0;
+    //     for ix in 0..100000 {
+    //         let e = rand(seed);
+    //         seed = e;
+    //         let val = rand(seed);
+    //         seed = val;
+    //         index.insert(e % 10000, val % 10000);
+    //     }
+    //     seed = 0;
+    //     // let mut v = vec![];
+    //     b.iter(|| {
+    //         let e = rand(seed);
+    //         seed = e;
+    //         let val = rand(seed);
+    //         seed = val;
+    //         index.check(e % 10000, val % 10000);
+    //     });
+    //     // println!("results: {:?}", v.len());
+    // }
+
+
+
+    #[bench]
+    fn bench_faster_radix_sort_small(b: &mut Bencher) {
+        // let data = vec![1,2,3,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,4];
+        // let data = generate_unsorted(20);
+        let mut data = vec![];
+        let mut seed = 0;
+        for _ in 0..1000 {
+            let e = rand(seed);
+            seed = e;
+            // let val = rand(seed);
+            // seed = val;
+            data.push(e);
+        }
+        // data.sort();
+        b.iter(|| {
+            // let mut foo = data.clone();
+            // faster_radix_sort(&mut foo);
+            for _ in 0..5 {
+                let e = rand(seed);
+                seed = e;
+                data.insert((e % 1000) as usize, 0);
+            }
+            // data.sort();
+        })
     }
 }
 

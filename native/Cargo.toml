@@ -5,3 +5,4 @@ authors = ["Chris Granger <ibdknox@gmail.com>"]
 
 [dependencies]
 rand = "0.3.15"
+fnv = "1.0.5"

@@ -10,7 +10,6 @@ mod ops;
 use ops::doit;
 
 mod indexes;
-use indexes::{BitIndex, BitMatrix};
 
 fn rand(rseed:u32) -> u32 {
 	return ((Wrapping(rseed) * Wrapping(1103515245) + Wrapping(12345)) & Wrapping(0x7fffffff)).0;

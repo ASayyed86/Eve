@@ -8,7 +8,7 @@
 //  - index insert
 //  - functions
 
-use indexes::BitIndex;
+use indexes::HashIndex;
 use std::collections::HashMap;
 use std::mem::transmute;
 use std::time::Instant;
@@ -133,14 +133,14 @@ impl EstimateIter {
 pub struct Frame<'a> {
     input: &'a Change,
     row: Row,
-    index: &'a BitIndex,
+    index: &'a HashIndex,
     constraints: Option<&'a Vec<Constraint>>,
     blocks: &'a Vec<Block>,
     iters: Vec<Option<EstimateIter>>,
 }
 
 impl<'a> Frame<'a> {
-    pub fn new(index: &'a BitIndex, blocks: &'a Vec<Block>, input:&'a Change) -> Frame<'a> {
+    pub fn new(index: &'a HashIndex, blocks: &'a Vec<Block>, input:&'a Change) -> Frame<'a> {
         Frame {row: Row::new(64), index, input, blocks, constraints: None, iters: vec![None; 64]}
     }
 
@@ -206,7 +206,7 @@ pub fn get_iterator(frame: &mut Frame, iter_ix:u32, constraint:u32, bail:i32) ->
             let resolved_a = frame.resolve(a);
             let resolved_v = frame.resolve(v);
 
-            // println!("Getting proposal for {:?} {:?} {:?}", resolved_e, resolved_a, resolved_v);
+            println!("Getting proposal for {:?} {:?} {:?}", resolved_e, resolved_a, resolved_v);
             let mut iter = frame.index.propose(resolved_e, resolved_a, resolved_v);
             match iter {
                 EstimateIter::Scan {estimate, pos, ref values, ref mut output} => {
@@ -232,7 +232,7 @@ pub fn get_iterator(frame: &mut Frame, iter_ix:u32, constraint:u32, bail:i32) ->
 pub fn iterator_next(frame: &mut Frame, iterator:u32, bail:i32) -> i32 {
     let go = {
         let mut iter = frame.iters[iterator as usize].as_mut();
-        // println!("Iter Next: {:?}", iter);
+        println!("Iter Next: {:?}", iter);
         match iter {
             Some(ref mut cur) => {
                 match cur.next(&mut frame.row) {
@@ -249,7 +249,7 @@ pub fn iterator_next(frame: &mut Frame, iterator:u32, bail:i32) -> i32 {
     if go == bail {
         frame.iters[iterator as usize] = None;
     }
-    // println!("Row: {:?}", &frame.row.fields[0..3]);
+    println!("Row: {:?}", &frame.row.fields[0..3]);
     go
 }
 
@@ -285,7 +285,7 @@ pub fn accept(frame: &mut Frame, constraint:u32, bail:i32) -> i32 {
 }
 
 pub fn get_rounds(frame: &mut Frame, bail:i32) -> i32 {
-    // println!("get rounds!");
+    println!("get rounds!");
     1
 }
 
@@ -305,7 +305,7 @@ pub fn output(frame: &mut Frame, constraint:u32, next:i32) -> i32 {
                 transaction: 0,
                 count: 1,
             };
-            // println!("insert {:?}", c);
+            println!("insert {:?}", c);
         },
         _ => {}
     };
@@ -564,16 +564,16 @@ pub fn doit() {
 
 
     let change = Change { e:0, a:0, v:0, n:0, round:0, transaction:0, count:0};
-    let mut index = BitIndex::new();
-    index.insert(int.string_id("foo"), int.string_id("tag"), int.string_id("person"), 0,0,0,0);
-    index.insert(int.string_id("foo"), int.string_id("name"), int.string_id("chris"), 0,0,0,0);
-    index.insert(int.string_id("meep"), int.string_id("tag"), int.string_id("person"), 0,0,0,0);
-    index.insert(int.string_id("meep"), int.string_id("name"), int.string_id("chris"), 0,0,0,0);
-    index.insert(int.string_id("joe"), int.string_id("tag"), int.string_id("person"), 0,0,0,0);
-    index.insert(int.string_id("eep"), int.string_id("name"), int.string_id("loop"), 0,0,0,0);
-    index.insert(int.string_id("eep2"), int.string_id("name"), int.string_id("loop"), 0,0,0,0);
+    let mut index = HashIndex::new();
+    index.insert(int.string_id("foo"), int.string_id("tag"), int.string_id("person"));
+    index.insert(int.string_id("foo"), int.string_id("name"), int.string_id("chris"));
+    index.insert(int.string_id("meep"), int.string_id("tag"), int.string_id("person"));
+    index.insert(int.string_id("meep"), int.string_id("name"), int.string_id("chris"));
+    index.insert(int.string_id("joe"), int.string_id("tag"), int.string_id("person"));
+    index.insert(int.string_id("eep"), int.string_id("name"), int.string_id("loop"));
+    index.insert(int.string_id("eep2"), int.string_id("name"), int.string_id("loop"));
     // let start = Instant::now();
-    for _ in 0..1000000 {
+    for _ in 0..1 {
         let mut frame = Frame::new(&mut index, &blocks, &change);
         interpret(&mut frame, &pipe);
     }
@@ -700,14 +700,14 @@ pub mod tests {
         ];
 
         let change = Change { e:0, a:0, v:0, n:0, round:0, transaction:0, count:0};
-        let mut index = BitIndex::new();
-        index.insert(int.string_id("foo"), int.string_id("tag"), int.string_id("person"), 0,0,0,0);
-        index.insert(int.string_id("foo"), int.string_id("name"), int.string_id("chris"), 0,0,0,0);
-        index.insert(int.string_id("meep"), int.string_id("tag"), int.string_id("person"), 0,0,0,0);
-        index.insert(int.string_id("meep"), int.string_id("name"), int.string_id("chris"), 0,0,0,0);
-        index.insert(int.string_id("joe"), int.string_id("tag"), int.string_id("person"), 0,0,0,0);
-        index.insert(int.string_id("eep"), int.string_id("name"), int.string_id("loop"), 0,0,0,0);
-        index.insert(int.string_id("eep2"), int.string_id("name"), int.string_id("loop"), 0,0,0,0);
+        let mut index = HashIndex::new();
+        index.insert(int.string_id("foo"), int.string_id("tag"), int.string_id("person"));
+        index.insert(int.string_id("foo"), int.string_id("name"), int.string_id("chris"));
+        index.insert(int.string_id("meep"), int.string_id("tag"), int.string_id("person"));
+        index.insert(int.string_id("meep"), int.string_id("name"), int.string_id("chris"));
+        index.insert(int.string_id("joe"), int.string_id("tag"), int.string_id("person"));
+        index.insert(int.string_id("eep"), int.string_id("name"), int.string_id("loop"));
+        index.insert(int.string_id("eep2"), int.string_id("name"), int.string_id("loop"));
 
         // let start = Instant::now();
         let mut frame = Frame::new(&mut index, &blocks, &change);
@@ -802,14 +802,14 @@ pub mod tests {
             Instruction::output {next: -8, constraint: 6},
         ];
 
-        let mut index = BitIndex::new();
-        index.insert(int.string_id("foo"), int.string_id("tag"), int.string_id("person"), 0,0,0,0);
-        index.insert(int.string_id("foo"), int.string_id("name"), int.string_id("chris"), 0,0,0,0);
-        index.insert(int.string_id("meep"), int.string_id("tag"), int.string_id("person"), 0,0,0,0);
-        index.insert(int.string_id("meep"), int.string_id("name"), int.string_id("chris"), 0,0,0,0);
-        index.insert(int.string_id("joe"), int.string_id("tag"), int.string_id("person"), 0,0,0,0);
-        index.insert(int.string_id("eep"), int.string_id("name"), int.string_id("loop"), 0,0,0,0);
-        index.insert(int.string_id("eep2"), int.string_id("name"), int.string_id("loop"), 0,0,0,0);
+        let mut index = HashIndex::new();
+        index.insert(int.string_id("foo"), int.string_id("tag"), int.string_id("person"));
+        index.insert(int.string_id("foo"), int.string_id("name"), int.string_id("chris"));
+        index.insert(int.string_id("meep"), int.string_id("tag"), int.string_id("person"));
+        index.insert(int.string_id("meep"), int.string_id("name"), int.string_id("chris"));
+        index.insert(int.string_id("joe"), int.string_id("tag"), int.string_id("person"));
+        index.insert(int.string_id("eep"), int.string_id("name"), int.string_id("loop"));
+        index.insert(int.string_id("eep2"), int.string_id("name"), int.string_id("loop"));
 
         b.iter(|| {
             let change = Change { e:0, a:0, v:0, n:0, round:0, transaction:0, count:0};

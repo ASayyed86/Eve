@@ -7,6 +7,7 @@ use std::num::Wrapping;
 use std::time::Instant;
 
 mod ops;
+use ops::doit;
 
 mod indexes;
 use indexes::{BitIndex, BitMatrix};
@@ -16,29 +17,5 @@ fn rand(rseed:u32) -> u32 {
 }
 
 fn main() {
-    let mut index = BitIndex::new();
-    index.insert(1,1,1,0,0,0,0);
-    index.insert(1,2,1,0,0,0,0);
-    index.insert(2,3,1,0,0,0,0);
-    index.insert(1,3,100,0,0,0,0);
-    println!("{:?}", index.check(1,1,1));
-    println!("{:?}", index.check(1,2,1));
-    println!("{:?}", index.check(2,3,1));
-    println!("{:?}", index.check(1,3,100));
-    println!("{:?}", index.check(1,9,100));
-
-    let start = Instant::now();
-    for _ in 0..10 {
-        let mut index = BitMatrix::new();
-        let mut seed = 0;
-        for _ in 0..100000 {
-            let e = rand(seed) % 10000;
-            seed = e;
-            let val = rand(seed) % 10000;
-            seed = val;
-            index.insert(e, val);
-        }
-
-    }
-    println!("TOOK {:?}", start.elapsed());
+    doit();
 }

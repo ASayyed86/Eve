@@ -1,5 +1,33 @@
+//-------------------------------------------------------------------------
+// Indexes
+//-------------------------------------------------------------------------
+
 use std::collections::HashMap;
 use ops::EstimateIter;
+use ops::Change;
+use std::cmp;
+
+//-------------------------------------------------------------------------
+// Utils
+//-------------------------------------------------------------------------
+
+pub fn ensure_len(vec:&mut Vec<i32>, len:usize) {
+    if vec.len() < len {
+        vec.resize(len, 0);
+    }
+}
+
+pub fn get_delta(last:i32, next:i32) -> i32 {
+    if last == 0 && next > 0 { 1 }
+    else if last > 0 && next == 0 { -1 }
+    else if last > 0 && next < 0 { -1 }
+    else if last < 0 && next > 0 { 1 }
+    else { 0 }
+}
+
+//-------------------------------------------------------------------------
+// Level store
+//-------------------------------------------------------------------------
 
 #[derive(Debug)]
 struct LevelStore {
@@ -48,6 +76,10 @@ impl LevelStore {
         ix
     }
 }
+
+//-------------------------------------------------------------------------
+// BitMatrix
+//-------------------------------------------------------------------------
 
 #[derive(Debug)]
 pub struct BitMatrix {
@@ -399,6 +431,10 @@ impl BitMatrix {
     }
 }
 
+//-------------------------------------------------------------------------
+// BitIndex
+//-------------------------------------------------------------------------
+
 // #[derive(Debug)]
 pub struct BitIndex {
     matrices: HashMap<u32, BitMatrix>,
@@ -454,6 +490,491 @@ impl BitIndex {
 
     }
 }
+
+//-------------------------------------------------------------------------
+// Distinct Index
+//-------------------------------------------------------------------------
+
+
+pub struct DistinctIndex {
+    index: HashMap<(u32, u32, u32), Vec<i32>>,
+}
+
+impl DistinctIndex {
+    pub fn new() -> DistinctIndex {
+        DistinctIndex { index: HashMap::new() }
+    }
+
+    pub fn distinct(&mut self, input:&Change, results:&mut Vec<Change>) {
+        let key = (input.e, input.a, input.v);
+        let input_count = input.count;
+        let mut counts = self.index.entry(key).or_insert_with(|| vec![]);
+        println!("Pre counts {:?}", counts);
+        ensure_len(counts, (input.round + 1) as usize);
+        let counts_len = counts.len() as u32;
+        let min = cmp::min(input.round + 1, counts_len);
+        let mut cur_count = 0;
+        for ix in 0..min {
+           cur_count += counts[ix as usize];
+        };
+
+        // @TODO: handle Infinity/-Infinity for commits at round 0
+
+        let next_count = cur_count + input_count;
+        let delta = get_delta(cur_count, next_count);
+        if delta != 0 {
+            results.push(input.with_round_count(input.round, delta));
+        }
+
+        cur_count = next_count;
+        counts[input.round as usize] += input.count;
+
+        for round_ix in (input.round + 1)..counts_len {
+            let round_count = counts[round_ix as usize];
+            if round_count == 0 { continue; }
+
+            let last_count = cur_count - input_count;
+            let next_count = last_count + round_count;
+            let delta = get_delta(last_count, next_count);
+
+            let last_count_changed = cur_count;
+            let next_count_changed = cur_count + round_count;
+            let delta_changed = get_delta(last_count_changed, next_count_changed);
+
+            let mut final_delta = 0;
+            if delta != 0 && delta != delta_changed {
+                //undo the delta
+                final_delta = -delta;
+            } else if delta != delta_changed {
+                final_delta = delta_changed;
+            }
+
+            if final_delta != 0 {
+                println!("HERE {:?} {:?} | {:?} {:?}", round_ix, final_delta, delta, delta_changed);
+                results.push(input.with_round_count(round_ix, final_delta));
+            }
+
+            cur_count = next_count_changed;
+        }
+        println!("Post counts {:?}", counts);
+    }
+}
+
+//-------------------------------------------------------------------------
+// Distinct tests
+//-------------------------------------------------------------------------
+
+#[cfg(test)]
+mod DistinctTests {
+    extern crate test;
+
+    use super::*;
+    use self::test::Bencher;
+
+    fn round_counts_to_changes(counts: Vec<(u32, i32)>) -> Vec<Change> {
+        let mut changes = vec![];
+        let cur = Change { e: 1, a: 2, v: 3, n: 4, transaction: 1, round: 0, count: 0 };
+        for &(round, count) in counts.iter() {
+            changes.push(cur.with_round_count(round, count));
+        }
+        changes
+    }
+
+    fn test_distinct(counts: Vec<(u32, i32)>, expected: Vec<(u32, i32)>) {
+        let mut index = DistinctIndex::new();
+        let changes = round_counts_to_changes(counts);
+
+        let mut final_results: HashMap<u32, i32> = HashMap::new();
+        let mut distinct_changes = vec![];
+        for change in changes.iter() {
+            distinct_changes.clear();
+            index.distinct(change, &mut distinct_changes);
+            for distinct in distinct_changes.iter() {
+                println!("distinct: {:?}", distinct);
+                let cur = if final_results.contains_key(&distinct.round) { final_results[&distinct.round] } else { 0 };
+                final_results.insert(distinct.round, cur + distinct.count);
+            }
+        }
+
+        println!("final {:?}", final_results);
+
+        let mut expected_map = HashMap::new();
+        for &(round, count) in expected.iter() {
+            expected_map.insert(round, count);
+            let valid = match final_results.get(&round) {
+                Some(&actual) => actual == count,
+                None => count == 0,
+            };
+            assert!(valid, "round {:?} :: expected {:?}, actual {:?}", round, count, final_results.get(&round));
+        }
+
+        for (round, count) in final_results.iter() {
+            let valid = match expected_map.get(&round) {
+                Some(&actual) => actual == *count,
+                None => *count == 0,
+            };
+            assert!(valid, "round {:?} :: expected {:?}, actual {:?}", round, expected_map.get(&round), count);
+        }
+
+    }
+
+    #[test]
+    fn basic() {
+        test_distinct(vec![
+            (1,1),
+            (2,-1),
+
+            (1, 1),
+            (3, -1),
+        ], vec![
+            (1, 1),
+            (3, -1)
+        ])
+    }
+
+    #[test]
+    fn basic_2() {
+        test_distinct(vec![
+            (1,1),
+            (2,-1),
+
+            (3, 1),
+            (4, -1),
+        ], vec![
+            (1, 1),
+            (2, -1),
+            (3, 1),
+            (4, -1),
+        ])
+    }
+
+    #[test]
+    fn basic_2_reverse_order() {
+        test_distinct(vec![
+            (3,1),
+            (4,-1),
+
+            (1, 1),
+            (2, -1),
+        ], vec![
+            (1, 1),
+            (2, -1),
+            (3, 1),
+            (4, -1),
+        ])
+    }
+
+    #[test]
+    fn basic_2_undone() {
+        test_distinct(vec![
+            (1,1),
+            (2,-1),
+
+            (3, 1),
+            (4, -1),
+
+            (1,-1),
+            (2,1),
+        ], vec![
+            (3, 1),
+            (4, -1),
+        ])
+    }
+
+    #[test]
+    fn basic_multiple() {
+        test_distinct(vec![
+            (1,1),
+            (1,1),
+            (1,1),
+            (1,1),
+            (2,-1),
+            (2,-1),
+            (2,-1),
+            (2,-1),
+
+            (3, 1),
+            (3, 1),
+            (3, 1),
+            (4, -1),
+            (4, -1),
+            (4, -1),
+        ], vec![
+            (1, 1),
+            (2, -1),
+            (3, 1),
+            (4, -1),
+        ])
+    }
+
+    #[test]
+    fn basic_multiple_reversed() {
+        test_distinct(vec![
+            (3, 1),
+            (3, 1),
+            (3, 1),
+            (4, -1),
+            (4, -1),
+            (4, -1),
+
+            (1,1),
+            (1,1),
+            (1,1),
+            (1,1),
+            (2,-1),
+            (2,-1),
+            (2,-1),
+            (2,-1),
+        ], vec![
+            (1, 1),
+            (2, -1),
+            (3, 1),
+            (4, -1),
+        ])
+    }
+
+    #[test]
+    fn basic_interleaved() {
+        test_distinct(vec![
+            (3, 1),
+            (4, -1),
+            (3, 1),
+            (4, -1),
+            (3, 1),
+            (4, -1),
+
+            (1,1),
+            (2,-1),
+            (1,1),
+            (2,-1),
+            (1,1),
+            (2,-1),
+            (1,1),
+            (2,-1),
+        ], vec![
+            (1, 1),
+            (2, -1),
+            (3, 1),
+            (4, -1),
+        ])
+    }
+
+    #[test]
+    fn basic_multiple_negative_first() {
+        test_distinct(vec![
+            (2,-1),
+            (2,-1),
+            (2,-1),
+            (1,1),
+            (1,1),
+            (1,1),
+
+            (4, -1),
+            (4, -1),
+            (4, -1),
+            (3, 1),
+            (3, 1),
+            (3, 1),
+        ], vec![
+            (1, 1),
+            (2, -1),
+            (3, 1),
+            (4, -1),
+        ])
+    }
+
+    #[test]
+    fn basic_multiple_undone() {
+        test_distinct(vec![
+            (1,1),
+            (1,1),
+            (1,1),
+            (1,1),
+            (2,-1),
+            (2,-1),
+            (2,-1),
+            (2,-1),
+
+            (3, 1),
+            (3, 1),
+            (3, 1),
+            (4, -1),
+            (4, -1),
+            (4, -1),
+
+            (1,-1),
+            (1,-1),
+            (1,-1),
+            (1,-1),
+            (2,1),
+            (2,1),
+            (2,1),
+            (2,1),
+        ], vec![
+            (3, 1),
+            (4, -1),
+        ])
+    }
+
+    #[test]
+    fn basic_multiple_undone_interleaved() {
+        test_distinct(vec![
+            (1,1),
+            (1,1),
+            (1,1),
+            (1,1),
+            (2,-1),
+            (2,-1),
+            (2,-1),
+            (2,-1),
+
+            (1,-1),
+            (1,-1),
+            (1,-1),
+            (1,-1),
+
+            (3, 1),
+            (3, 1),
+            (3, 1),
+            (4, -1),
+            (4, -1),
+            (4, -1),
+
+            (2,1),
+            (2,1),
+            (2,1),
+            (2,1),
+        ], vec![
+            (3, 1),
+            (4, -1),
+        ])
+    }
+
+    #[test]
+    fn basic_multiple_different_counts() {
+        test_distinct(vec![
+            (1,1),
+            (1,1),
+            (1,1),
+            (1,1),
+            (2,-1),
+            (2,-1),
+            (2,-1),
+            (2,-1),
+
+            (3, 1),
+            (4, -1),
+        ], vec![
+            (1, 1),
+            (2, -1),
+            (3, 1),
+            (4, -1),
+        ])
+    }
+
+    #[test]
+    fn basic_multiple_different_counts_extra_removes() {
+        test_distinct(vec![
+            (1,1),
+            (1,1),
+            (1,1),
+            (1,1),
+            (2,-1),
+            (2,-1),
+            (2,-1),
+            (2,-1),
+
+            (1,-1),
+            (1,-1),
+            (1,-1),
+            (1,-1),
+            (2,1),
+            (2,1),
+            (2,1),
+            (2,1),
+
+            (3, 1),
+            (4, -1),
+        ], vec![
+            (3, 1),
+            (4, -1),
+        ])
+    }
+
+    #[test]
+    fn simple_round_promotion() {
+        test_distinct(vec![
+            (8,1),
+            (9,-1),
+
+            (5,1),
+            (6,-1),
+            (8,-1),
+            (9,1),
+        ], vec![
+            (5, 1),
+            (6, -1)
+        ])
+    }
+
+    #[test]
+    fn full_promotion() {
+        test_distinct(vec![
+            (9,1),
+            (9,1),
+            (10,-1),
+            (10,-1),
+
+            (9,1),
+            (9,1),
+            (10,-1),
+            (10,-1),
+
+            (9,-1),
+            (10,1),
+            (9,-1),
+            (10,1),
+
+            (9,-1),
+            (10,1),
+            (9,-1),
+            (10,1),
+        ], vec![
+            (9, 0),
+            (10, 0)
+        ])
+    }
+
+    #[test]
+    fn positive_full_promotion() {
+        test_distinct(vec![
+            (7,1),
+            (8,-1),
+            (8,1),
+            (7,1),
+            (8,-1),
+            (4,1),
+            (8, -1),
+            (7, 1),
+            (8, -1),
+            (8, 1),
+            (5, -1),
+            (7, -3),
+            (8, 1),
+            (8, 3),
+            (5, 1),
+            (8, 1),
+            (8, -2),
+            (8, -1),
+        ], vec![
+            (4, 1),
+        ])
+    }
+}
+
+//-------------------------------------------------------------------------
+// BitIndex Tests
+//-------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -543,18 +1064,67 @@ mod tests {
 
     #[bench]
     fn benchmark(b:&mut Bencher) {
+        let mut total = 0;
+        let mut times = 0;
         b.iter(|| {
+            times += 1;
             let mut index = BitMatrix::new();
             let mut seed = 0;
-            for _ in 0..100000 {
-                let e = rand(seed) % 10000;
+            for ix in 0..100000 {
+                let e = rand(seed + ix);
                 seed = e;
-                let val = rand(seed) % 10000;
+                let val = rand(seed + ix);
                 seed = val;
-                index.insert(e, val);
+                index.insert(e % 10000, val % 10000);
             }
+            total += index.cardinality;
+        });
+        println!("{:?} : {:?}", times, total);
+    }
 
-        })
+    struct HashIndex {
+        full: HashMap<(u32, u32), bool>,
+        e: HashMap<u32, Vec<u32>>,
+        v: HashMap<u32, Vec<u32>>,
+        size: u32,
+    }
+
+    impl HashIndex {
+        pub fn new() -> HashIndex {
+            HashIndex { full: HashMap::new(), e: HashMap::new(), v: HashMap::new(), size: 0 }
+        }
+        pub fn insert(&mut self, e: u32, v:u32) {
+            let key = (e, v);
+            if !self.full.contains_key(&key) {
+                self.size += 1;
+                self.full.insert(key, true);
+                let es = self.e.entry(e).or_insert_with(|| vec![]);
+                es.push(v);
+                let vs = self.v.entry(v).or_insert_with(|| vec![]);
+                vs.push(v);
+            }
+        }
+    }
+
+    #[bench]
+    fn bench_hashtable(b:&mut Bencher) {
+        let mut total = 0;
+        let mut times = 0;
+        b.iter(|| {
+            times += 1;
+            let mut index = HashIndex::new();
+            let mut seed = 0;
+            for ix in 0..100000 {
+                let e = rand(seed);
+                seed = e;
+                let val = rand(seed);
+                seed = val;
+                index.insert(e % 10000, val % 10000);
+                // println!("inserting {:?} {:?}", e, val);
+            }
+            total += index.size;
+        });
+        println!("{:?} : {:?}", times, total);
     }
 }
 

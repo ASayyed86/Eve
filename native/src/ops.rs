@@ -8,13 +8,15 @@
 //  - index insert
 //  - functions
 
-use indexes::HashIndex;
+use indexes::{HashIndex, DistinctIndex};
 use std::collections::HashMap;
 use std::mem::transmute;
 use std::time::Instant;
+use std::collections::hash_map::Entry;
+use std::cmp;
 
 //-------------------------------------------------------------------------
-// Frame
+// Change
 //-------------------------------------------------------------------------
 
 #[derive(Debug, Copy, Clone)]
@@ -133,15 +135,17 @@ impl EstimateIter {
 pub struct Frame<'a> {
     input: &'a Change,
     row: Row,
-    index: &'a HashIndex,
+    index: &'a mut HashIndex,
     constraints: Option<&'a Vec<Constraint>>,
     blocks: &'a Vec<Block>,
     iters: Vec<Option<EstimateIter>>,
+    distinct: &'a mut DistinctIndex,
+    rounds: &'a mut RoundHolder,
 }
 
 impl<'a> Frame<'a> {
-    pub fn new(index: &'a HashIndex, blocks: &'a Vec<Block>, input:&'a Change) -> Frame<'a> {
-        Frame {row: Row::new(64), index, input, blocks, constraints: None, iters: vec![None; 64]}
+    pub fn new(index: &'a mut HashIndex, rounds: &'a mut RoundHolder, distinct: &'a mut DistinctIndex, blocks: &'a Vec<Block>, input:&'a Change) -> Frame<'a> {
+        Frame {row: Row::new(64), index, rounds, distinct, input, blocks, constraints: None, iters: vec![None; 64]}
     }
 
     pub fn resolve(&self, field:&Field) -> u32 {
@@ -206,7 +210,7 @@ pub fn get_iterator(frame: &mut Frame, iter_ix:u32, constraint:u32, bail:i32) ->
             let resolved_a = frame.resolve(a);
             let resolved_v = frame.resolve(v);
 
-            println!("Getting proposal for {:?} {:?} {:?}", resolved_e, resolved_a, resolved_v);
+            // println!("Getting proposal for {:?} {:?} {:?}", resolved_e, resolved_a, resolved_v);
             let mut iter = frame.index.propose(resolved_e, resolved_a, resolved_v);
             match iter {
                 EstimateIter::Scan {estimate, pos, ref values, ref mut output} => {
@@ -232,7 +236,7 @@ pub fn get_iterator(frame: &mut Frame, iter_ix:u32, constraint:u32, bail:i32) ->
 pub fn iterator_next(frame: &mut Frame, iterator:u32, bail:i32) -> i32 {
     let go = {
         let mut iter = frame.iters[iterator as usize].as_mut();
-        println!("Iter Next: {:?}", iter);
+        // println!("Iter Next: {:?}", iter);
         match iter {
             Some(ref mut cur) => {
                 match cur.next(&mut frame.row) {
@@ -249,7 +253,7 @@ pub fn iterator_next(frame: &mut Frame, iterator:u32, bail:i32) -> i32 {
     if go == bail {
         frame.iters[iterator as usize] = None;
     }
-    println!("Row: {:?}", &frame.row.fields[0..3]);
+    // println!("Row: {:?}", &frame.row.fields[0..3]);
     go
 }
 
@@ -260,7 +264,7 @@ pub fn accept(frame: &mut Frame, constraint:u32, bail:i32) -> i32 {
     };
     match cur {
         &Constraint::Scan {ref e, ref a, ref v, ref register_mask} => {
-            // if we aren't solving for something in this scan cares about, then we
+            // if we aren't solving for something this scan cares about, then we
             // automatically accept it.
             if !check_bits(*register_mask, frame.row.solving_for) {
                 // println!("auto accept {:?} {:?}", cur, frame.row.solving_for);
@@ -285,7 +289,7 @@ pub fn accept(frame: &mut Frame, constraint:u32, bail:i32) -> i32 {
 }
 
 pub fn get_rounds(frame: &mut Frame, bail:i32) -> i32 {
-    println!("get rounds!");
+    // println!("get rounds!");
     1
 }
 
@@ -305,7 +309,8 @@ pub fn output(frame: &mut Frame, constraint:u32, next:i32) -> i32 {
                 transaction: 0,
                 count: 1,
             };
-            println!("insert {:?}", c);
+            frame.distinct.distinct(&c, &mut frame.rounds);
+            // println!("insert {:?}", results);
         },
         _ => {}
     };
@@ -474,6 +479,92 @@ pub fn interpret(mut frame:&mut Frame, pipe:&Vec<Instruction>) {
 }
 
 //-------------------------------------------------------------------------
+// Round holder
+//-------------------------------------------------------------------------
+
+pub struct RoundHolder {
+    rounds: Vec<HashMap<(u32,u32,u32), Change>>,
+    max_round: usize,
+}
+
+impl RoundHolder {
+    pub fn new() -> RoundHolder {
+        let mut rounds = vec![];
+        for _ in 0..100 {
+            rounds.push(HashMap::new());
+        }
+        RoundHolder { rounds, max_round: 0 }
+    }
+
+    pub fn insert(&mut self, change:Change) {
+        let key = (change.e, change.a, change.v);
+        let round = change.round as usize;
+        self.max_round = cmp::max(round, self.max_round);
+        match self.rounds[round].entry(key) {
+            Entry::Occupied(mut o) => {
+                o.get_mut().count += change.count;
+            }
+            Entry::Vacant(o) => {
+                o.insert(change);
+            }
+        };
+    }
+
+    pub fn clear(&mut self) {
+        for ix in 0..self.max_round {
+            self.rounds[ix].clear();
+        }
+        self.max_round = 0;
+    }
+
+    pub fn iter(&self) -> RoundHolderIter {
+        RoundHolderIter::new(self)
+    }
+}
+
+pub struct RoundHolderIter<'a> {
+    holder: &'a RoundHolder,
+    max_round: usize,
+    round_ix: usize,
+    change_ix: usize,
+    cur_changes: Vec<&'a Change>,
+}
+
+impl<'a> RoundHolderIter<'a> {
+    pub fn new(holder: &'a RoundHolder) -> RoundHolderIter<'a> {
+        RoundHolderIter { holder, round_ix: 0, change_ix: 0, max_round: holder.max_round, cur_changes: vec![] }
+    }
+}
+
+impl<'a> Iterator for RoundHolderIter<'a> {
+    type Item = Change;
+
+    fn next(&mut self) -> Option<Change> {
+        let ref mut cur_changes = self.cur_changes;
+        let mut round_ix = self.round_ix;
+        let mut change_ix = self.change_ix;
+        let mut max_round = self.max_round;
+        if change_ix >= cur_changes.len() {
+            cur_changes.clear();
+            change_ix = 0;
+            while round_ix <= max_round + 1 && cur_changes.len() == 0 {
+                for change in self.holder.rounds[round_ix].values() {
+                    cur_changes.push(change);
+                }
+                round_ix += 1;
+            }
+        }
+        self.change_ix = change_ix + 1;
+        self.round_ix = round_ix;
+        match cur_changes.get(change_ix) {
+            None => None,
+            Some(&change) => Some(change.clone()),
+        }
+    }
+}
+
+
+//-------------------------------------------------------------------------
 // Tests
 //-------------------------------------------------------------------------
 
@@ -564,6 +655,8 @@ pub fn doit() {
 
 
     let change = Change { e:0, a:0, v:0, n:0, round:0, transaction:0, count:0};
+    let mut distinct = DistinctIndex::new();
+    let mut rounds = RoundHolder::new();
     let mut index = HashIndex::new();
     index.insert(int.string_id("foo"), int.string_id("tag"), int.string_id("person"));
     index.insert(int.string_id("foo"), int.string_id("name"), int.string_id("chris"));
@@ -574,7 +667,7 @@ pub fn doit() {
     index.insert(int.string_id("eep2"), int.string_id("name"), int.string_id("loop"));
     // let start = Instant::now();
     for _ in 0..1 {
-        let mut frame = Frame::new(&mut index, &blocks, &change);
+        let mut frame = Frame::new(&mut index, &mut rounds, &mut distinct, &blocks, &change);
         interpret(&mut frame, &pipe);
     }
     // println!("TOOK {:?}", start.elapsed());
@@ -700,6 +793,8 @@ pub mod tests {
         ];
 
         let change = Change { e:0, a:0, v:0, n:0, round:0, transaction:0, count:0};
+        let mut distinct = DistinctIndex::new();
+        let mut rounds = RoundHolder::new();
         let mut index = HashIndex::new();
         index.insert(int.string_id("foo"), int.string_id("tag"), int.string_id("person"));
         index.insert(int.string_id("foo"), int.string_id("name"), int.string_id("chris"));
@@ -710,7 +805,7 @@ pub mod tests {
         index.insert(int.string_id("eep2"), int.string_id("name"), int.string_id("loop"));
 
         // let start = Instant::now();
-        let mut frame = Frame::new(&mut index, &blocks, &change);
+        let mut frame = Frame::new(&mut index, &mut rounds, &mut distinct, &blocks, &change);
         interpret(&mut frame, &pipe);
         // println!("TOOK {:?}", start.elapsed());
     }
@@ -802,6 +897,8 @@ pub mod tests {
             Instruction::output {next: -8, constraint: 6},
         ];
 
+        let mut distinct = DistinctIndex::new();
+        let mut rounds = RoundHolder::new();
         let mut index = HashIndex::new();
         index.insert(int.string_id("foo"), int.string_id("tag"), int.string_id("person"));
         index.insert(int.string_id("foo"), int.string_id("name"), int.string_id("chris"));
@@ -813,7 +910,7 @@ pub mod tests {
 
         b.iter(|| {
             let change = Change { e:0, a:0, v:0, n:0, round:0, transaction:0, count:0};
-            let mut frame = Frame::new(&mut index, &blocks, &change);
+            let mut frame = Frame::new(&mut index, &mut rounds, &mut distinct, &blocks, &change);
             interpret(&mut frame, &pipe);
         })
     }

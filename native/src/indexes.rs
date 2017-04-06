@@ -3,8 +3,7 @@
 //-------------------------------------------------------------------------
 
 use std::collections::HashMap;
-use ops::EstimateIter;
-use ops::Change;
+use ops::{EstimateIter, Change, RoundHolder};
 use std::cmp;
 use std;
 use std::collections::hash_map::Entry;
@@ -209,11 +208,11 @@ impl DistinctIndex {
         DistinctIndex { index: HashMap::new() }
     }
 
-    pub fn distinct(&mut self, input:&Change, results:&mut Vec<Change>) {
+    pub fn distinct(&mut self, input:&Change, rounds:&mut RoundHolder) {
         let key = (input.e, input.a, input.v);
         let input_count = input.count;
         let mut counts = self.index.entry(key).or_insert_with(|| vec![]);
-        println!("Pre counts {:?}", counts);
+        // println!("Pre counts {:?}", counts);
         ensure_len(counts, (input.round + 1) as usize);
         let counts_len = counts.len() as u32;
         let min = cmp::min(input.round + 1, counts_len);
@@ -227,7 +226,7 @@ impl DistinctIndex {
         let next_count = cur_count + input_count;
         let delta = get_delta(cur_count, next_count);
         if delta != 0 {
-            results.push(input.with_round_count(input.round, delta));
+            rounds.insert(input.with_round_count(input.round, delta));
         }
 
         cur_count = next_count;
@@ -254,13 +253,13 @@ impl DistinctIndex {
             }
 
             if final_delta != 0 {
-                println!("HERE {:?} {:?} | {:?} {:?}", round_ix, final_delta, delta, delta_changed);
-                results.push(input.with_round_count(round_ix, final_delta));
+                // println!("HERE {:?} {:?} | {:?} {:?}", round_ix, final_delta, delta, delta_changed);
+                rounds.insert(input.with_round_count(round_ix, final_delta));
             }
 
             cur_count = next_count_changed;
         }
-        println!("Post counts {:?}", counts);
+        // println!("Post counts {:?}", counts);
     }
 }
 
@@ -289,15 +288,14 @@ mod DistinctTests {
         let changes = round_counts_to_changes(counts);
 
         let mut final_results: HashMap<u32, i32> = HashMap::new();
-        let mut distinct_changes = vec![];
+        let mut distinct_changes = RoundHolder::new();
         for change in changes.iter() {
-            distinct_changes.clear();
             index.distinct(change, &mut distinct_changes);
-            for distinct in distinct_changes.iter() {
-                println!("distinct: {:?}", distinct);
-                let cur = if final_results.contains_key(&distinct.round) { final_results[&distinct.round] } else { 0 };
-                final_results.insert(distinct.round, cur + distinct.count);
-            }
+        }
+        for distinct in distinct_changes.iter() {
+            println!("distinct: {:?}", distinct);
+            let cur = if final_results.contains_key(&distinct.round) { final_results[&distinct.round] } else { 0 };
+            final_results.insert(distinct.round, cur + distinct.count);
         }
 
         println!("final {:?}", final_results);

@@ -502,6 +502,13 @@ pub struct RoundHolder {
     max_round: usize,
 }
 
+pub fn move_output_round(info:&Option<(u32, i32)>, round:&mut u32, count:&mut i32) {
+    if let &Some((r, c)) = info {
+        *round = r;
+        *count += c;
+    }
+}
+
 impl RoundHolder {
     pub fn new() -> RoundHolder {
         let mut rounds = vec![];
@@ -511,78 +518,80 @@ impl RoundHolder {
         RoundHolder { rounds, output_rounds:vec![], max_round: 0 }
     }
 
-    pub fn compute_output_rounds(&mut self, mut distincts: DistinctIter) {
+    pub fn compute_output_rounds(&mut self, mut right_iter: DistinctIter) {
         let mut neue = vec![];
         {
-            let mut cur = self.output_rounds.iter();
-            let mut leftRound = 0;
-            let mut leftCount = 0;
-            let mut rightRound = 0;
-            let mut rightCount = 0;
-            let mut nextLeft = cur.next();
-            let mut nextRight = distincts.next();
-            if let Some(left) = nextLeft {
-                leftRound = left.0;
-                leftCount += left.1;
-            }
-            if let Some(right) = nextRight {
-                rightRound = right.0;
-                rightCount += right.1;
-            }
-            while nextLeft != None || nextRight != None {
-                println!("left: {:?}, right: {:?}", nextLeft, nextRight);
-                println!("  left count: {:?}, right count: {:?}", leftCount, rightCount);
-                if leftRound == rightRound {
-                    neue.push((leftRound, leftCount * rightCount));
-                    nextLeft = cur.next();
-                    nextRight = distincts.next();
-                } else if leftRound > rightRound {
-                    let mut next = distincts.next();
-                    while next != None && next.unwrap().0 <= leftRound {
-                        rightRound = next.unwrap().0;
-                        rightCount += next.unwrap().1;
-                        next = distincts.next();
-                    }
-                    let count = nextLeft.unwrap().1 * rightCount;
-                    if count != 0 {
-                        neue.push((leftRound, count));
-                    }
-                    if next == None {
-                        nextLeft = cur.next();
-                        if let Some(left) = nextLeft {
-                            leftRound = left.0;
-                            leftCount += left.1;
+            // let len = self.output_rounds.len();
+            let mut left_iter = self.output_rounds.drain(..);
+            let mut left_round = 0;
+            let mut left_count = 0;
+            let mut right_round = 0;
+            let mut right_count = 0;
+            let mut left = left_iter.next();
+            let mut right = right_iter.next();
+            let mut next_left = left_iter.next();
+            let mut next_right = right_iter.next();
+            move_output_round(&left, &mut left_round, &mut left_count);
+            move_output_round(&right, &mut right_round, &mut right_count);
+            while left != None || right != None {
+                if left_round == right_round {
+                    if let Some((round, count)) = left {
+                        let total = count * right_count;
+                        if total != 0 {
+                            neue.push((left_round, total));
                         }
                     }
-                    nextRight = next;
-                    if let Some(right) = nextRight {
-                        rightRound = right.0;
-                        rightCount += right.1;
+                } else if left_round > right_round {
+                    while next_right != None && next_right.unwrap().0 < left_round {
+                        right = next_right;
+                        next_right = right_iter.next();
+                        move_output_round(&right, &mut right_round, &mut right_count);
+                    }
+                    if let Some((round, count)) = left {
+                        let total = count * right_count;
+                        if total != 0 {
+                            neue.push((left_round, total));
+                        }
                     }
                 } else {
-                    let mut next = cur.next();
-                    while next != None && next.unwrap().0 <= rightRound {
-                        leftRound = next.unwrap().0;
-                        leftCount += next.unwrap().1;
-                        next = cur.next();
+                    while next_left != None && next_left.unwrap().0 < right_round {
+                        left = next_left;
+                        next_left = left_iter.next();
+                        move_output_round(&left, &mut left_round, &mut left_count);
                     }
-                    let count = leftCount * nextRight.unwrap().1;
-                    if count != 0 {
-                        neue.push((rightRound, count));
-                    }
-                    nextLeft = next;
-                    if let Some(left) = nextLeft {
-                        leftRound = left.0;
-                        leftCount += left.1;
-                    }
-                    if next == None {
-                        nextRight = distincts.next();
-                        if let Some(right) = nextRight {
-                            rightRound = right.0;
-                            rightCount += right.1;
+                    if let Some((round, count)) = right {
+                        let total = count * left_count;
+                        if total != 0 {
+                            neue.push((right_round, total));
                         }
                     }
                 }
+
+                match (next_left, next_right) {
+                    (None, None) => { break; },
+                    (None, Some(_)) => {
+                        right = next_right;
+                        next_right = right_iter.next();
+                        move_output_round(&right, &mut right_round, &mut right_count);
+                    },
+                    (Some(_), None) => {
+                        left = next_left;
+                        next_left = left_iter.next();
+                        move_output_round(&left, &mut left_round, &mut left_count);
+                    },
+                    (Some((next_left_count, _)), Some((next_right_count, _))) => {
+                        if next_left_count <= next_right_count {
+                            left = next_left;
+                            next_left = left_iter.next();
+                            move_output_round(&left, &mut left_round, &mut left_count);
+                        } else {
+                            right = next_right;
+                            next_right = right_iter.next();
+                            move_output_round(&right, &mut right_round, &mut right_count);
+                        }
+                    }
+                }
+
             }
         }
         self.output_rounds = neue;
@@ -814,9 +823,22 @@ pub mod tests {
 
     #[test]
     fn round_holder_compute_output_rounds() {
-        // check_output_rounds(vec![(3,1), (5,1)], vec![1,-1,0,0,1,0,-1], vec![(4,1), (5,1), (6,-2)]);
-        // check_output_rounds(vec![(3,1), (5,1)], vec![1,-1,0,0], vec![]);
+        check_output_rounds(vec![(3,1), (5,1)], vec![1,-1,0,0,1,0,-1], vec![(4,1), (5,1), (6,-2)]);
+        check_output_rounds(vec![(3,1), (5,1)], vec![1,-1,0,1,0,0,-1], vec![(3,1), (5,1), (6,-2)]);
+        check_output_rounds(vec![(3,1), (5,1)], vec![1,-1,0,0], vec![]);
         check_output_rounds(vec![(3,1), (5,1)], vec![1,0,0,0,0,0,-1], vec![(3,1), (5,1), (6,-2)]);
+        check_output_rounds(vec![(0,1), (6,-1)], vec![1,0,0,0,0,0,-1], vec![(0,1), (6,-1)]);
+    }
+
+    #[bench]
+    pub fn round_holder_compute_output_rounds_bench(b:&mut Bencher) {
+        let mut holder = RoundHolder::new();
+        let rounds = vec![1,-1,0,0,1,0,-1];
+        holder.output_rounds = vec![(3,1), (5,1)];
+        b.iter(|| {
+            let mut iter = DistinctIter::new(&rounds);
+            holder.compute_output_rounds(iter);
+        });
     }
 
     // #[test]

@@ -8,7 +8,7 @@
 //  - index insert
 //  - functions
 
-use indexes::{HashIndex, DistinctIndex};
+use indexes::{HashIndex, DistinctIndex, DistinctIter};
 use std::collections::HashMap;
 use std::mem::transmute;
 use std::time::Instant;
@@ -184,7 +184,7 @@ pub enum Instruction {
     get_iterator {iterator: u32, bail: i32, constraint: u32},
     iterator_next {iterator: u32, bail: i32},
     accept {bail: i32, constraint:u32},
-    get_rounds {bail: i32},
+    get_rounds {bail: i32, constraint: u32},
     output {next: i32, constraint:u32},
 }
 
@@ -288,9 +288,23 @@ pub fn accept(frame: &mut Frame, constraint:u32, bail:i32) -> i32 {
     }
 }
 
-pub fn get_rounds(frame: &mut Frame, bail:i32) -> i32 {
+pub fn get_rounds(frame: &mut Frame, constraint:u32, bail:i32) -> i32 {
+    let cur = match frame.constraints {
+        Some(ref constraints) => &constraints[constraint as usize],
+        None => return bail as i32,
+    };
+    match cur {
+        &Constraint::Scan {ref e, ref a, ref v, ref register_mask} => {
+            let resolved_e = frame.resolve(e);
+            let resolved_a = frame.resolve(a);
+            let resolved_v = frame.resolve(v);
+            frame.rounds.compute_output_rounds(frame.distinct.iter(resolved_e, resolved_a, resolved_v));
+            1
+        },
+        _ => { panic!("Get rounds on non-scan") }
+    }
     // println!("get rounds!");
-    1
+
 }
 
 pub fn output(frame: &mut Frame, constraint:u32, next:i32) -> i32 {
@@ -464,8 +478,8 @@ pub fn interpret(mut frame:&mut Frame, pipe:&Vec<Instruction>) {
             Instruction::accept { constraint, bail } => {
                 accept(&mut frame, constraint, bail)
             },
-            Instruction::get_rounds { bail } => {
-                get_rounds(&mut frame, bail)
+            Instruction::get_rounds { constraint, bail } => {
+                get_rounds(&mut frame, constraint, bail)
             },
             Instruction::output { constraint, next } => {
                 output(&mut frame, constraint, next)
@@ -483,6 +497,7 @@ pub fn interpret(mut frame:&mut Frame, pipe:&Vec<Instruction>) {
 //-------------------------------------------------------------------------
 
 pub struct RoundHolder {
+    output_rounds: Vec<(u32, i32)>,
     rounds: Vec<HashMap<(u32,u32,u32), Change>>,
     max_round: usize,
 }
@@ -493,7 +508,88 @@ impl RoundHolder {
         for _ in 0..100 {
             rounds.push(HashMap::new());
         }
-        RoundHolder { rounds, max_round: 0 }
+        RoundHolder { rounds, output_rounds:vec![], max_round: 0 }
+    }
+
+    pub fn compute_output_rounds(&mut self, mut distincts: DistinctIter) {
+        let mut neue = vec![];
+        {
+            let mut cur = self.output_rounds.iter();
+            let mut leftRound = 0;
+            let mut leftCount = 0;
+            let mut rightRound = 0;
+            let mut rightCount = 0;
+            let mut nextLeft = cur.next();
+            let mut nextRight = distincts.next();
+            if let Some(left) = nextLeft {
+                leftRound = left.0;
+                leftCount += left.1;
+            }
+            if let Some(right) = nextRight {
+                rightRound = right.0;
+                rightCount += right.1;
+            }
+            while nextLeft != None || nextRight != None {
+                println!("left: {:?}, right: {:?}", nextLeft, nextRight);
+                println!("  left count: {:?}, right count: {:?}", leftCount, rightCount);
+                if leftRound == rightRound {
+                    neue.push((leftRound, leftCount * rightCount));
+                    nextLeft = cur.next();
+                    nextRight = distincts.next();
+                } else if leftRound > rightRound {
+                    let mut next = distincts.next();
+                    while next != None && next.unwrap().0 <= leftRound {
+                        rightRound = next.unwrap().0;
+                        rightCount += next.unwrap().1;
+                        next = distincts.next();
+                    }
+                    let count = nextLeft.unwrap().1 * rightCount;
+                    if count != 0 {
+                        neue.push((leftRound, count));
+                    }
+                    if next == None {
+                        nextLeft = cur.next();
+                        if let Some(left) = nextLeft {
+                            leftRound = left.0;
+                            leftCount += left.1;
+                        }
+                    }
+                    nextRight = next;
+                    if let Some(right) = nextRight {
+                        rightRound = right.0;
+                        rightCount += right.1;
+                    }
+                } else {
+                    let mut next = cur.next();
+                    while next != None && next.unwrap().0 <= rightRound {
+                        leftRound = next.unwrap().0;
+                        leftCount += next.unwrap().1;
+                        next = cur.next();
+                    }
+                    let count = leftCount * nextRight.unwrap().1;
+                    if count != 0 {
+                        neue.push((rightRound, count));
+                    }
+                    nextLeft = next;
+                    if let Some(left) = nextLeft {
+                        leftRound = left.0;
+                        leftCount += left.1;
+                    }
+                    if next == None {
+                        nextRight = distincts.next();
+                        if let Some(right) = nextRight {
+                            rightRound = right.0;
+                            rightCount += right.1;
+                        }
+                    }
+                }
+            }
+        }
+        self.output_rounds = neue;
+    }
+
+    pub fn output(&self, distinct:&mut DistinctIndex, e:u32, a:u32, v:u32, n:u32) {
+
     }
 
     pub fn insert(&mut self, change:Change) {
@@ -646,11 +742,12 @@ pub fn doit() {
         // Instruction::accept {bail: -3, constraint: 2},
         // Instruction::accept {bail: -4, constraint: 3},
 
-        Instruction::get_rounds {bail: -5},
+        Instruction::get_rounds {bail: -5, constraint: 0},
+        Instruction::get_rounds {bail: -6, constraint: 1},
 
         Instruction::output {next: 1, constraint: 4},
         Instruction::output {next: 1, constraint: 5},
-        Instruction::output {next: -8, constraint: 6},
+        Instruction::output {next: -9, constraint: 6},
     ];
 
 
@@ -704,6 +801,22 @@ pub mod tests {
         assert!(has_bit(solved, 0));
         assert!(!has_bit(solved, 1));
         assert!(!has_bit(solved, 2));
+    }
+
+    fn check_output_rounds(existing: Vec<(u32, i32)>, neueRounds: Vec<i32>, expected: Vec<(u32, i32)>) {
+        let mut holder = RoundHolder::new();
+        let mut iter = DistinctIter::new(&neueRounds);
+        holder.output_rounds = existing;
+        holder.compute_output_rounds(iter);
+        assert_eq!(holder.output_rounds, expected);
+
+    }
+
+    #[test]
+    fn round_holder_compute_output_rounds() {
+        // check_output_rounds(vec![(3,1), (5,1)], vec![1,-1,0,0,1,0,-1], vec![(4,1), (5,1), (6,-2)]);
+        // check_output_rounds(vec![(3,1), (5,1)], vec![1,-1,0,0], vec![]);
+        check_output_rounds(vec![(3,1), (5,1)], vec![1,0,0,0,0,0,-1], vec![(3,1), (5,1), (6,-2)]);
     }
 
     // #[test]
@@ -785,11 +898,12 @@ pub mod tests {
             // Instruction::accept {bail: -3, constraint: 2},
             // Instruction::accept {bail: -4, constraint: 3},
 
-            Instruction::get_rounds {bail: -5},
+            Instruction::get_rounds {bail: -5, constraint: 0},
+            Instruction::get_rounds {bail: -6, constraint: 1},
 
             Instruction::output {next: 1, constraint: 4},
             Instruction::output {next: 1, constraint: 5},
-            Instruction::output {next: -8, constraint: 6},
+            Instruction::output {next: -9, constraint: 6},
         ];
 
         let change = Change { e:0, a:0, v:0, n:0, round:0, transaction:0, count:0};
@@ -890,11 +1004,12 @@ pub mod tests {
             // Instruction::accept {bail: -3, constraint: 2},
             // Instruction::accept {bail: -4, constraint: 3},
 
-            Instruction::get_rounds {bail: -5},
+            Instruction::get_rounds {bail: -5, constraint: 0},
+            Instruction::get_rounds {bail: -6, constraint: 1},
 
             Instruction::output {next: 1, constraint: 4},
             Instruction::output {next: 1, constraint: 5},
-            Instruction::output {next: -8, constraint: 6},
+            Instruction::output {next: -9, constraint: 6},
         ];
 
         let mut distinct = DistinctIndex::new();

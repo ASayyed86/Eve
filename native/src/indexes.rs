@@ -198,14 +198,59 @@ impl HashIndex {
 // Distinct Index
 //-------------------------------------------------------------------------
 
+pub struct DistinctIter<'a> {
+    ix: usize,
+    total: i32,
+    len: usize,
+    rounds: &'a Vec<i32>,
+}
+
+impl<'a> DistinctIter<'a> {
+    pub fn new(rounds:&'a Vec<i32>) -> DistinctIter<'a> {
+        DistinctIter { rounds, ix: 0, total: 0, len: rounds.len() }
+    }
+}
+
+impl<'a> Iterator for DistinctIter<'a> {
+    type Item = (u32, i32);
+
+    fn next(&mut self) -> Option<(u32, i32)> {
+        let mut ix = self.ix;
+        let mut total = self.total;
+        let ref mut rounds = self.rounds;
+        let mut delta = 0;
+        while ix < self.len && delta == 0 {
+            let next = rounds[ix];
+            delta = get_delta(total, total + next);
+            total += next;
+            ix += 1;
+        }
+        self.ix = ix;
+        self.total = total;
+        if delta == 0 {
+            None
+        } else {
+            Some(((ix - 1) as u32, delta))
+        }
+    }
+}
 
 pub struct DistinctIndex {
     index: HashMap<(u32, u32, u32), Vec<i32>>,
+    empty: Vec<i32>,
 }
 
 impl DistinctIndex {
     pub fn new() -> DistinctIndex {
-        DistinctIndex { index: HashMap::new() }
+        DistinctIndex { index: HashMap::new(), empty: vec![] }
+    }
+
+    pub fn iter(&self, e:u32, a:u32, v:u32) -> DistinctIter {
+        let key = (e, a, v);
+        match self.index.get(&key) {
+            Some(rounds) => DistinctIter::new(rounds),
+            None => DistinctIter::new(&self.empty),
+        }
     }
 
     pub fn distinct(&mut self, input:&Change, rounds:&mut RoundHolder) {
@@ -296,6 +341,14 @@ mod DistinctTests {
             println!("distinct: {:?}", distinct);
             let cur = if final_results.contains_key(&distinct.round) { final_results[&distinct.round] } else { 0 };
             final_results.insert(distinct.round, cur + distinct.count);
+        }
+
+        for (round, count) in index.iter(changes[0].e, changes[0].a, changes[0].v) {
+            let valid = match final_results.get(&round) {
+                Some(&actual) => actual == count,
+                None => count == 0,
+            };
+            assert!(valid, "iterator round {:?} :: expected {:?}, actual {:?}", round, count, final_results.get(&round));
         }
 
         println!("final {:?}", final_results);

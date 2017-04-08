@@ -133,7 +133,7 @@ impl EstimateIter {
 //-------------------------------------------------------------------------
 
 pub struct Frame<'a> {
-    input: &'a Change,
+    input: Option<Change>,
     row: Row,
     index: &'a mut HashIndex,
     constraints: Option<&'a Vec<Constraint>>,
@@ -144,8 +144,8 @@ pub struct Frame<'a> {
 }
 
 impl<'a> Frame<'a> {
-    pub fn new(index: &'a mut HashIndex, rounds: &'a mut RoundHolder, distinct: &'a mut DistinctIndex, blocks: &'a Vec<Block>, input:&'a Change) -> Frame<'a> {
-        Frame {row: Row::new(64), index, rounds, distinct, input, blocks, constraints: None, iters: vec![None; 64]}
+    pub fn new(index: &'a mut HashIndex, rounds: &'a mut RoundHolder, distinct: &'a mut DistinctIndex, blocks: &'a Vec<Block>) -> Frame<'a> {
+        Frame {row: Row::new(64), index, rounds, distinct, input: None, blocks, constraints: None, iters: vec![None; 64]}
     }
 
     pub fn resolve(&self, field:&Field) -> u32 {
@@ -179,11 +179,13 @@ impl<'a> Frame<'a> {
 // Instruction
 //-------------------------------------------------------------------------
 
+#[derive(Debug)]
 pub enum Instruction {
     start_block { block: u32 },
     get_iterator {iterator: u32, bail: i32, constraint: u32},
     iterator_next {iterator: u32, bail: i32},
     accept {bail: i32, constraint:u32},
+    clear_rounds,
     get_rounds {bail: i32, constraint: u32},
     output {next: i32, constraint:u32},
 }
@@ -236,7 +238,7 @@ pub fn get_iterator(frame: &mut Frame, iter_ix:u32, constraint:u32, bail:i32) ->
 pub fn iterator_next(frame: &mut Frame, iterator:u32, bail:i32) -> i32 {
     let go = {
         let mut iter = frame.iters[iterator as usize].as_mut();
-        // println!("Iter Next: {:?}", iter);
+        println!("Iter Next: {:?}", iter);
         match iter {
             Some(ref mut cur) => {
                 match cur.next(&mut frame.row) {
@@ -253,7 +255,7 @@ pub fn iterator_next(frame: &mut Frame, iterator:u32, bail:i32) -> i32 {
     if go == bail {
         frame.iters[iterator as usize] = None;
     }
-    // println!("Row: {:?}", &frame.row.fields[0..3]);
+    println!("Row: {:?}", &frame.row.fields[0..3]);
     go
 }
 
@@ -288,7 +290,17 @@ pub fn accept(frame: &mut Frame, constraint:u32, bail:i32) -> i32 {
     }
 }
 
+pub fn clear_rounds(frame: &mut Frame) -> i32 {
+    frame.rounds.clear();
+        println!("DOING WORK!");
+    if let Some(change) = frame.input {
+        frame.rounds.output_rounds.push((change.round, change.count));
+    }
+    1
+}
+
 pub fn get_rounds(frame: &mut Frame, constraint:u32, bail:i32) -> i32 {
+    println!("get rounds!");
     let cur = match frame.constraints {
         Some(ref constraints) => &constraints[constraint as usize],
         None => return bail as i32,
@@ -303,7 +315,6 @@ pub fn get_rounds(frame: &mut Frame, constraint:u32, bail:i32) -> i32 {
         },
         _ => { panic!("Get rounds on non-scan") }
     }
-    // println!("get rounds!");
 
 }
 
@@ -314,17 +325,16 @@ pub fn output(frame: &mut Frame, constraint:u32, next:i32) -> i32 {
     };
     match cur {
         &Constraint::Insert {ref e, ref a, ref v} => {
-            let c = Change {
-                e: frame.resolve(e),
-                a: frame.resolve(a),
-                v: frame.resolve(v),
-                n: 0,
-                round: 0,
-                transaction: 0,
-                count: 1,
-            };
-            frame.distinct.distinct(&c, &mut frame.rounds);
-            // println!("insert {:?}", results);
+            let c = Change { e: frame.resolve(e), a: frame.resolve(a), v:frame.resolve(v), n: 0, round:0, transaction: 0, count:0, };
+            println!("want to output {:?}", c);
+            let ref mut rounds = frame.rounds;
+            println!("rounds {:?}", rounds.output_rounds);
+            // @FIXME this clone is completely unnecessary, but borrows are a bit sad here
+            for &(round, count) in rounds.output_rounds.clone().iter() {
+                let output = &c.with_round_count(round + 1, count);
+                frame.distinct.distinct(output, rounds);
+                println!("insert {:?}", output);
+            }
         },
         _ => {}
     };
@@ -478,6 +488,9 @@ pub fn interpret(mut frame:&mut Frame, pipe:&Vec<Instruction>) {
             Instruction::accept { constraint, bail } => {
                 accept(&mut frame, constraint, bail)
             },
+            Instruction::clear_rounds => {
+                clear_rounds(&mut frame)
+            },
             Instruction::get_rounds { constraint, bail } => {
                 get_rounds(&mut frame, constraint, bail)
             },
@@ -485,8 +498,7 @@ pub fn interpret(mut frame:&mut Frame, pipe:&Vec<Instruction>) {
                 output(&mut frame, constraint, next)
             },
             _ => {
-                // println!("SKIPPING");
-                1
+                panic!("Unknown instruction: {:?}", inst);
             }
         }
     }
@@ -499,7 +511,7 @@ pub fn interpret(mut frame:&mut Frame, pipe:&Vec<Instruction>) {
 pub struct RoundHolder {
     output_rounds: Vec<(u32, i32)>,
     rounds: Vec<HashMap<(u32,u32,u32), Change>>,
-    max_round: usize,
+    pub max_round: usize,
 }
 
 pub fn move_output_round(info:&Option<(u32, i32)>, round:&mut u32, count:&mut i32) {
@@ -534,6 +546,7 @@ impl RoundHolder {
             move_output_round(&left, &mut left_round, &mut left_count);
             move_output_round(&right, &mut right_round, &mut right_count);
             while left != None || right != None {
+                println!("left: {:?}, right {:?}", left, right);
                 if left_round == right_round {
                     if let Some((round, count)) = left {
                         let total = count * right_count;
@@ -597,10 +610,6 @@ impl RoundHolder {
         self.output_rounds = neue;
     }
 
-    pub fn output(&self, distinct:&mut DistinctIndex, e:u32, a:u32, v:u32, n:u32) {
-
-    }
-
     pub fn insert(&mut self, change:Change) {
         let key = (change.e, change.a, change.v);
         let round = change.round as usize;
@@ -623,37 +632,31 @@ impl RoundHolder {
     }
 
     pub fn iter(&self) -> RoundHolderIter {
-        RoundHolderIter::new(self)
+        RoundHolderIter::new()
     }
 }
 
-pub struct RoundHolderIter<'a> {
-    holder: &'a RoundHolder,
-    max_round: usize,
+pub struct RoundHolderIter {
     round_ix: usize,
     change_ix: usize,
-    cur_changes: Vec<&'a Change>,
+    cur_changes: Vec<Change>,
 }
 
-impl<'a> RoundHolderIter<'a> {
-    pub fn new(holder: &'a RoundHolder) -> RoundHolderIter<'a> {
-        RoundHolderIter { holder, round_ix: 0, change_ix: 0, max_round: holder.max_round, cur_changes: vec![] }
+impl<'a> RoundHolderIter {
+    pub fn new() -> RoundHolderIter {
+        RoundHolderIter { round_ix: 0, change_ix: 0, cur_changes: vec![] }
     }
-}
 
-impl<'a> Iterator for RoundHolderIter<'a> {
-    type Item = Change;
-
-    fn next(&mut self) -> Option<Change> {
+    fn next(&mut self, holder: &mut RoundHolder) -> Option<Change> {
         let ref mut cur_changes = self.cur_changes;
         let mut round_ix = self.round_ix;
         let mut change_ix = self.change_ix;
-        let mut max_round = self.max_round;
+        let max_round = holder.max_round;
         if change_ix >= cur_changes.len() {
             cur_changes.clear();
             change_ix = 0;
             while round_ix <= max_round + 1 && cur_changes.len() == 0 {
-                for change in self.holder.rounds[round_ix].values() {
+                for (_, change) in holder.rounds[round_ix].drain() {
                     cur_changes.push(change);
                 }
                 round_ix += 1;
@@ -668,6 +671,69 @@ impl<'a> Iterator for RoundHolderIter<'a> {
     }
 }
 
+// impl<'a> Iterator for RoundHolderIter<'a> {
+//     type Item = Change;
+
+//     fn next(&mut self) -> Option<Change> {
+//         let ref mut cur_changes = self.cur_changes;
+//         let mut round_ix = self.round_ix;
+//         let mut change_ix = self.change_ix;
+//         let mut max_round = self.max_round;
+//         if change_ix >= cur_changes.len() {
+//             cur_changes.clear();
+//             change_ix = 0;
+//             while round_ix <= max_round + 1 && cur_changes.len() == 0 {
+//                 for change in self.holder.rounds[round_ix].values() {
+//                     cur_changes.push(change);
+//                 }
+//                 round_ix += 1;
+//             }
+//         }
+//         self.change_ix = change_ix + 1;
+//         self.round_ix = round_ix;
+//         match cur_changes.get(change_ix) {
+//             None => None,
+//             Some(&change) => Some(change.clone()),
+//         }
+//     }
+// }
+
+//-------------------------------------------------------------------------
+// Transaction
+//-------------------------------------------------------------------------
+
+pub struct Transaction<'a> {
+    rounds: RoundHolder,
+    pipes: &'a Vec<Instruction>,
+    blocks: &'a Vec<Block>,
+    index: &'a mut HashIndex,
+    distinct: &'a mut DistinctIndex,
+}
+
+impl<'a> Transaction<'a> {
+    pub fn new(index: &'a mut HashIndex, distinct: &'a mut DistinctIndex, blocks: &'a Vec<Block>, pipes: &'a Vec<Instruction>) -> Transaction<'a> {
+        let mut rounds = RoundHolder::new();
+        Transaction { pipes, rounds, blocks, index, distinct }
+    }
+
+    pub fn input(&mut self, e:u32, a:u32, v:u32, count: i32) {
+        let change = Change { e,a,v,n: 0, transaction:0, round:0, count };
+        self.distinct.distinct(&change, &mut self.rounds);
+    }
+
+    pub fn exec(&mut self) {
+        let ref mut rounds = self.rounds;
+        let mut items = RoundHolderIter::new();
+        let mut foo = items.next(rounds);
+        while let Some(change) = foo {
+            foo = items.next(rounds);
+            let mut frame = Frame::new(self.index, rounds, self.distinct, &self.blocks);
+            frame.input = Some(change);
+            interpret(&mut frame, self.pipes);
+            frame.index.insert(change.e, change.a, change.v);
+        }
+    }
+}
 
 //-------------------------------------------------------------------------
 // Tests
@@ -751,30 +817,24 @@ pub fn doit() {
         // Instruction::accept {bail: -3, constraint: 2},
         // Instruction::accept {bail: -4, constraint: 3},
 
-        Instruction::get_rounds {bail: -5, constraint: 0},
-        Instruction::get_rounds {bail: -6, constraint: 1},
+        Instruction::clear_rounds,
+        Instruction::get_rounds {bail: -6, constraint: 0},
+        Instruction::get_rounds {bail: -7, constraint: 1},
 
         Instruction::output {next: 1, constraint: 4},
         Instruction::output {next: 1, constraint: 5},
-        Instruction::output {next: -9, constraint: 6},
+        Instruction::output {next: -10, constraint: 6},
     ];
 
 
-    let change = Change { e:0, a:0, v:0, n:0, round:0, transaction:0, count:0};
     let mut distinct = DistinctIndex::new();
-    let mut rounds = RoundHolder::new();
     let mut index = HashIndex::new();
-    index.insert(int.string_id("foo"), int.string_id("tag"), int.string_id("person"));
-    index.insert(int.string_id("foo"), int.string_id("name"), int.string_id("chris"));
-    index.insert(int.string_id("meep"), int.string_id("tag"), int.string_id("person"));
-    index.insert(int.string_id("meep"), int.string_id("name"), int.string_id("chris"));
-    index.insert(int.string_id("joe"), int.string_id("tag"), int.string_id("person"));
-    index.insert(int.string_id("eep"), int.string_id("name"), int.string_id("loop"));
-    index.insert(int.string_id("eep2"), int.string_id("name"), int.string_id("loop"));
+    let mut txn = Transaction::new(&mut index, &mut distinct, &blocks, &pipe);
+    txn.input(int.string_id("foo"), int.string_id("tag"), int.string_id("person"), 1);
+    txn.input(int.string_id("foo"), int.string_id("name"), int.string_id("chris"), 1);
     // let start = Instant::now();
     for _ in 0..1 {
-        let mut frame = Frame::new(&mut index, &mut rounds, &mut distinct, &blocks, &change);
-        interpret(&mut frame, &pipe);
+        txn.exec();
     }
     // println!("TOOK {:?}", start.elapsed());
 }
@@ -928,7 +988,6 @@ pub mod tests {
             Instruction::output {next: -9, constraint: 6},
         ];
 
-        let change = Change { e:0, a:0, v:0, n:0, round:0, transaction:0, count:0};
         let mut distinct = DistinctIndex::new();
         let mut rounds = RoundHolder::new();
         let mut index = HashIndex::new();
@@ -941,7 +1000,7 @@ pub mod tests {
         index.insert(int.string_id("eep2"), int.string_id("name"), int.string_id("loop"));
 
         // let start = Instant::now();
-        let mut frame = Frame::new(&mut index, &mut rounds, &mut distinct, &blocks, &change);
+        let mut frame = Frame::new(&mut index, &mut rounds, &mut distinct, &blocks);
         interpret(&mut frame, &pipe);
         // println!("TOOK {:?}", start.elapsed());
     }

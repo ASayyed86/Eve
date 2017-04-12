@@ -3,8 +3,6 @@
 //-------------------------------------------------------------------------
 
 // TODO:
-//  - hookup distinct
-//  - get multiplicities
 //  - index insert
 //  - functions
 
@@ -671,32 +669,32 @@ impl<'a> RoundHolderIter {
     }
 }
 
-// impl<'a> Iterator for RoundHolderIter<'a> {
-//     type Item = Change;
+//-------------------------------------------------------------------------
+// Program
+//-------------------------------------------------------------------------
 
-//     fn next(&mut self) -> Option<Change> {
-//         let ref mut cur_changes = self.cur_changes;
-//         let mut round_ix = self.round_ix;
-//         let mut change_ix = self.change_ix;
-//         let mut max_round = self.max_round;
-//         if change_ix >= cur_changes.len() {
-//             cur_changes.clear();
-//             change_ix = 0;
-//             while round_ix <= max_round + 1 && cur_changes.len() == 0 {
-//                 for change in self.holder.rounds[round_ix].values() {
-//                     cur_changes.push(change);
-//                 }
-//                 round_ix += 1;
-//             }
-//         }
-//         self.change_ix = change_ix + 1;
-//         self.round_ix = round_ix;
-//         match cur_changes.get(change_ix) {
-//             None => None,
-//             Some(&change) => Some(change.clone()),
-//         }
-//     }
-// }
+pub struct Program {
+    pipes: Vec<Instruction>,
+    blocks: Vec<Block>,
+    index: HashIndex,
+    distinct: DistinctIndex,
+}
+
+impl Program {
+    pub fn new() -> Program {
+        let distinct = DistinctIndex::new();
+        let index = HashIndex::new();
+        Program { pipes: vec![], blocks: vec![], distinct, index }
+    }
+
+    pub fn register_block(&mut self, block:Block) {
+        self.blocks.push(block);
+    }
+
+    pub fn get_pipes(&self, input: Change) -> Vec<Vec<Instruction>> {
+        panic!("not implemented");
+    }
+}
 
 //-------------------------------------------------------------------------
 // Transaction
@@ -704,32 +702,28 @@ impl<'a> RoundHolderIter {
 
 pub struct Transaction<'a> {
     rounds: RoundHolder,
-    pipes: &'a Vec<Instruction>,
-    blocks: &'a Vec<Block>,
-    index: &'a mut HashIndex,
-    distinct: &'a mut DistinctIndex,
+    program: &'a mut Program,
 }
 
 impl<'a> Transaction<'a> {
-    pub fn new(index: &'a mut HashIndex, distinct: &'a mut DistinctIndex, blocks: &'a Vec<Block>, pipes: &'a Vec<Instruction>) -> Transaction<'a> {
+    pub fn new(program: &'a mut Program) -> Transaction<'a> {
         let mut rounds = RoundHolder::new();
-        Transaction { pipes, rounds, blocks, index, distinct }
+        Transaction { program, rounds}
     }
 
     pub fn input(&mut self, e:u32, a:u32, v:u32, count: i32) {
         let change = Change { e,a,v,n: 0, transaction:0, round:0, count };
-        self.distinct.distinct(&change, &mut self.rounds);
+        self.program.distinct.distinct(&change, &mut self.rounds);
     }
 
     pub fn exec(&mut self) {
+        let ref mut program = self.program;
         let ref mut rounds = self.rounds;
         let mut items = RoundHolderIter::new();
-        let mut foo = items.next(rounds);
-        while let Some(change) = foo {
-            foo = items.next(rounds);
-            let mut frame = Frame::new(self.index, rounds, self.distinct, &self.blocks);
+        while let Some(change) = items.next(rounds) {
+            let mut frame = Frame::new(&mut program.index, rounds, &mut program.distinct, &program.blocks);
             frame.input = Some(change);
-            interpret(&mut frame, self.pipes);
+            interpret(&mut frame, &program.pipes);
             frame.index.insert(change.e, change.a, change.v);
         }
     }
@@ -829,7 +823,8 @@ pub fn doit() {
 
     let mut distinct = DistinctIndex::new();
     let mut index = HashIndex::new();
-    let mut txn = Transaction::new(&mut index, &mut distinct, &blocks, &pipe);
+    let mut program = Program { distinct, index, pipes: pipe, blocks };
+    let mut txn = Transaction::new(&mut program);
     txn.input(int.string_id("foo"), int.string_id("tag"), int.string_id("person"), 1);
     txn.input(int.string_id("foo"), int.string_id("name"), int.string_id("chris"), 1);
     // let start = Instant::now();
